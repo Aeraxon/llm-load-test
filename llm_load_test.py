@@ -22,6 +22,7 @@ class TestResult:
     """Datenklasse für Testergebnisse"""
     users: int
     model: str
+    llm_provider: str
     gpu: str
     avg_response_time: float
     max_response_time: float
@@ -133,14 +134,16 @@ def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type,
             ttft_times.append(first_token_time)
             success_count.value += 1
             print(f"[User {user_id}] ✓ {elapsed_time:.2f}s (TTFT: {first_token_time:.2f}s) - {prompt[:30]}...")
+
+            # Pause zwischen erfolgreichen Requests (nur wenn noch Zeit bleibt)
+            if time.time() < end_time:
+                pause_time = random.uniform(pause_min, pause_max)
+                time.sleep(min(pause_time, end_time - time.time()))
         else:
             error_count.value += 1
-            print(f"[User {user_id}] ✗ {error_msg}")
-
-        # Pause zwischen Requests (nur wenn noch Zeit bleibt)
-        if time.time() < end_time:
-            pause_time = random.uniform(pause_min, pause_max)
-            time.sleep(min(pause_time, end_time - time.time()))
+            print(f"[User {user_id}] ✗ {error_msg} - Retry sofort...")
+            # Bei Fehler/Timeout: Sofort neuen Versuch ohne Pause
+            continue
 
 def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft):
     """Erstellt eine Empfehlung basierend auf TTFT und anderen Metriken"""
@@ -169,7 +172,7 @@ def check_api_connection(adapter):
     """Prüft ob die API erreichbar ist"""
     return adapter.check_connection()
 
-def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duration, api_type, base_url, api_key, gpu_name):
+def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duration, api_type, base_url, api_key, gpu_name, llm_provider):
     """Führt einen Load-Test mit einer bestimmten Anzahl von Benutzern durch"""
     reset_counters()
 
@@ -264,6 +267,7 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
     result = TestResult(
         users=user_count,
         model=model,
+        llm_provider=llm_provider,
         gpu=gpu_name,
         avg_response_time=sum(times) / len(times),
         max_response_time=max(times),
@@ -296,34 +300,124 @@ def print_results_table(results: List[TestResult]):
         print("Keine Ergebnisse zum Anzeigen.")
         return
 
-    print(f"\n{'='*138}")
+    print(f"\n{'='*153}")
     print("LOAD TEST ERGEBNISSE")
-    print(f"{'='*138}")
+    print(f"{'='*153}")
 
     # Header
-    print(f"{'Benutzer':<8} {'Modell':<15} {'GPU':<12} {'Avg. Zeit':<10} {'TTFT':<8} {'Max. Zeit':<10} {'Min. Zeit':<10} {'Fehlerrate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Empfehlung':<12}")
-    print(f"{'-'*8} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*12}")
+    print(f"{'Benutzer':<8} {'Modell':<15} {'LLM Provider':<15} {'GPU':<12} {'Avg. Zeit':<10} {'TTFT':<8} {'Max. Zeit':<10} {'Min. Zeit':<10} {'Fehlerrate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Empfehlung':<12}")
+    print(f"{'-'*8} {'-'*15} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*12}")
 
     # Datenzeilen
     for result in results:
-        print(f"{result.users:<8} {result.model:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<12}")
+        print(f"{result.users:<8} {result.model:<15} {result.llm_provider:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<12}")
 
-    print(f"{'-'*138}")
+    print(f"{'-'*153}")
 
 def save_results_to_file(results: List[TestResult], filename: str):
     """Speichert Ergebnisse in eine CSV-Datei"""
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             # CSV-Header
-            f.write("Benutzer,Modell,GPU,Avg_Antwortzeit,Avg_TTFT,Max_Antwortzeit,Min_Antwortzeit,Fehlerrate,CPU_Prozent,Memory_Prozent,Total_Requests,Erfolgreiche_Requests,Fehlgeschlagene_Requests,Testdauer,Empfehlung\n")
+            f.write("Benutzer,Modell,LLM_Provider,GPU,Avg_Antwortzeit,Avg_TTFT,Max_Antwortzeit,Min_Antwortzeit,Fehlerrate,CPU_Prozent,Memory_Prozent,Total_Requests,Erfolgreiche_Requests,Fehlgeschlagene_Requests,Testdauer,Empfehlung\n")
 
             # Datenzeilen
             for result in results:
-                f.write(f"{result.users},{result.model},{result.gpu},{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.max_response_time:.3f},{result.min_response_time:.3f},{result.error_rate:.2f},{result.cpu_usage:.2f},{result.memory_usage:.2f},{result.total_requests},{result.successful_requests},{result.failed_requests},{result.test_duration:.1f},{result.recommendation}\n")
+                f.write(f"{result.users},{result.model},{result.llm_provider},{result.gpu},{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.max_response_time:.3f},{result.min_response_time:.3f},{result.error_rate:.2f},{result.cpu_usage:.2f},{result.memory_usage:.2f},{result.total_requests},{result.successful_requests},{result.failed_requests},{result.test_duration:.1f},{result.recommendation}\n")
 
-        print(f"\nErgebnisse gespeichert in: {filename}")
+        print(f"\nCSV gespeichert: {filename}")
     except Exception as e:
-        print(f"Fehler beim Speichern: {e}")
+        print(f"Fehler beim Speichern der CSV: {e}")
+
+def save_results_to_markdown(results: List[TestResult], filename: str, test_config: dict):
+    """Speichert Ergebnisse als Markdown-Zusammenfassung"""
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            # Header
+            f.write("# LLM Load Test - Zusammenfassung\n\n")
+
+            # Test-Konfiguration
+            f.write("## Test-Konfiguration\n\n")
+            f.write(f"- **Datum/Zeit**: {test_config['timestamp']}\n")
+            f.write(f"- **LLM Provider**: {test_config['llm_provider']}\n")
+            f.write(f"- **API Typ**: {test_config['api_type']}\n")
+            f.write(f"- **Base URL**: {test_config['base_url']}\n")
+            f.write(f"- **Modelle**: {test_config['models']}\n")
+            f.write(f"- **GPU**: {test_config['gpu']}\n")
+            f.write(f"- **Testdauer pro Schritt**: {test_config['test_duration']/60:.1f} Minuten\n")
+            f.write(f"- **Pausenzeiten**: {test_config['pause_min']}-{test_config['pause_max']} Sekunden\n")
+            f.write(f"- **Benutzer-Schritte**: {test_config['user_steps']}\n\n")
+
+            # Ergebnisse gruppiert nach Modell
+            models = list(set([r.model for r in results]))
+
+            for model in models:
+                f.write(f"## Ergebnisse: {model}\n\n")
+                model_results = [r for r in results if r.model == model]
+
+                # Tabelle
+                f.write("| Benutzer | Avg. Zeit (s) | TTFT (s) | Max. Zeit (s) | Fehlerrate (%) | CPU (%) | Memory (%) | Requests | Empfehlung |\n")
+                f.write("|----------|---------------|----------|---------------|----------------|---------|------------|----------|------------|\n")
+
+                for result in model_results:
+                    f.write(f"| {result.users} | {result.avg_response_time:.2f} | {result.avg_ttft:.2f} | {result.max_response_time:.2f} | {result.error_rate:.1f} | {result.cpu_usage:.1f} | {result.memory_usage:.1f} | {result.total_requests} | {result.recommendation} |\n")
+
+                f.write("\n")
+
+                # Zusammenfassung für dieses Modell
+                best_result = max(model_results, key=lambda r: r.users if r.error_rate < 10 else 0)
+                f.write(f"### Zusammenfassung\n\n")
+                f.write(f"- **Beste Performance**: {best_result.users} gleichzeitige Benutzer\n")
+                f.write(f"- **Durchschnittliche TTFT**: {best_result.avg_ttft:.2f}s\n")
+                f.write(f"- **Durchschnittliche Antwortzeit**: {best_result.avg_response_time:.2f}s\n")
+                f.write(f"- **Fehlerrate**: {best_result.error_rate:.1f}%\n\n")
+
+            # Gesamtzusammenfassung
+            f.write("## Gesamtzusammenfassung\n\n")
+            total_requests = sum(r.total_requests for r in results)
+            total_successful = sum(r.successful_requests for r in results)
+            total_failed = sum(r.failed_requests for r in results)
+            avg_ttft_all = sum(r.avg_ttft for r in results) / len(results) if results else 0
+
+            f.write(f"- **Gesamt Requests**: {total_requests}\n")
+            f.write(f"- **Erfolgreiche Requests**: {total_successful}\n")
+            f.write(f"- **Fehlgeschlagene Requests**: {total_failed}\n")
+            f.write(f"- **Durchschnittliche TTFT (alle Tests)**: {avg_ttft_all:.2f}s\n")
+            f.write(f"- **Gesamtfehlerrate**: {(total_failed/total_requests*100) if total_requests > 0 else 0:.1f}%\n\n")
+
+            # Empfehlungen
+            f.write("## Empfehlungen\n\n")
+
+            # Finde besten Test (höchste Benutzeranzahl mit < 10% Fehlerrate)
+            good_results = [r for r in results if r.error_rate < 10]
+            if good_results:
+                best = max(good_results, key=lambda r: r.users)
+                f.write(f"- Empfohlene maximale Benutzeranzahl: **{best.users} gleichzeitige Benutzer**\n")
+                f.write(f"- Bei dieser Last: TTFT {best.avg_ttft:.2f}s, Fehlerrate {best.error_rate:.1f}%\n")
+            else:
+                f.write("- ⚠️ Alle Tests zeigten hohe Fehlerraten (>10%). System ist überlastet.\n")
+
+            f.write("\n")
+
+        print(f"Markdown gespeichert: {filename}")
+    except Exception as e:
+        print(f"Fehler beim Speichern der Markdown-Datei: {e}")
+
+def create_results_directory():
+    """Erstellt einen Ergebnis-Ordner mit Timestamp"""
+    import os
+
+    # Basis-Verzeichnis für Ergebnisse
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
+
+    # Ordner mit Timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_dir = os.path.join(base_dir, timestamp)
+
+    # Verzeichnisse erstellen
+    os.makedirs(result_dir, exist_ok=True)
+
+    return result_dir, timestamp
 
 def main():
     parser = argparse.ArgumentParser(description="Schrittweises Load Testing für LLM APIs (Ollama, vLLM, LM Studio, llama.cpp, etc.)")
@@ -333,6 +427,8 @@ def main():
                        help="Maximale Anzahl der Benutzer (wird schrittweise erreicht)")
     parser.add_argument("--model", type=str, required=True,
                        help="Modell(e), kommagetrennt für mehrere Modelle")
+    parser.add_argument("--llm-provider", type=str, required=True,
+                       help="LLM Provider Name (z.B. 'Ollama', 'vLLM', 'LM Studio', etc.)")
     parser.add_argument("--gpu", type=str, default="Unknown",
                        help="GPU-Bezeichnung für Dokumentation (Standard: Unknown)")
     parser.add_argument("--pause-min", type=float, default=3.0,
@@ -456,7 +552,7 @@ def main():
                 result = run_load_test(
                     model, prompts, user_count,
                     args.pause_min, args.pause_max,
-                    args.test_duration, api_type, base_url, api_key, args.gpu
+                    args.test_duration, api_type, base_url, api_key, args.gpu, args.llm_provider
                 )
 
                 if result:
@@ -470,17 +566,35 @@ def main():
         # Ergebnisse anzeigen
         print_results_table(results)
 
-        # CSV-Export falls gewünscht
+        # Ergebnisse speichern
         if args.output:
+            # Manuell angegebener Dateiname (nur CSV, ohne Ordner)
             save_results_to_file(results, args.output)
         else:
-            # Automatischer Dateiname mit bereinigten Modellnamen
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Modellnamen für Dateiname bereinigen (/, : durch _ ersetzen)
-            clean_models = [model.replace('/', '_').replace(':', '_') for model in models]
-            models_str = "_".join(clean_models)[:50]  # Begrenzen für Dateinamen
-            filename = f"llm_load_test_{models_str}_{timestamp}.csv"
-            save_results_to_file(results, filename)
+            # Automatisches Speichern in results/ Ordner mit Timestamp
+            result_dir, timestamp_str = create_results_directory()
+
+            # CSV speichern
+            csv_filename = os.path.join(result_dir, "results.csv")
+            save_results_to_file(results, csv_filename)
+
+            # Markdown-Zusammenfassung speichern
+            md_filename = os.path.join(result_dir, "summary.md")
+            test_config = {
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'llm_provider': args.llm_provider,
+                'api_type': api_type.upper(),
+                'base_url': base_url,
+                'models': ', '.join(models),
+                'gpu': args.gpu,
+                'test_duration': args.test_duration,
+                'pause_min': args.pause_min,
+                'pause_max': args.pause_max,
+                'user_steps': user_steps
+            }
+            save_results_to_markdown(results, md_filename, test_config)
+
+            print(f"\n📁 Ergebnisse gespeichert in: {result_dir}")
 
         print(f"\nLoad Test abgeschlossen um {datetime.now().strftime('%H:%M:%S')}")
 

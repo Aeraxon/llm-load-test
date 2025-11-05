@@ -6,6 +6,7 @@ A realistic load testing tool for LLM APIs that simulates real user behavior and
 
 ## Table of Contents
 
+- [Quickstart](#quickstart)
 - [Supported Backends](#supported-backends)
 - [Overview](#overview)
 - [Features](#features)
@@ -14,11 +15,42 @@ A realistic load testing tool for LLM APIs that simulates real user behavior and
 - [Usage](#usage)
 - [Parameters](#parameters)
 - [Examples](#examples)
+- [Output Files](#output-files)
 - [Prompts File](#prompts-file)
 - [Test Duration and Timing Behavior](#test-duration-and-timing-behavior)
 - [Interpreting Results](#interpreting-results)
-- [Troubleshooting](#troubleshooting)
 - [Best Practices](#best-practices)
+
+## Quickstart
+
+Get started in 3 steps:
+
+### 1. Install Dependencies
+```bash
+pip install requests psutil python-dotenv
+```
+
+### 2. Create a Prompts File
+Create a file `prompts.txt` with one prompt per line:
+```txt
+What is Python?
+Explain machine learning in simple terms
+Write a hello world function in JavaScript
+```
+
+### 3. Run Your First Test
+```bash
+# For Ollama (default)
+python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --llm-provider "Ollama"
+
+# For vLLM
+python llm_load_test.py --api-type vllm --host 127.0.0.1:8000 --prompts prompts.txt --users 20 --model "meta-llama/Llama-2-7b-chat-hf" --llm-provider "vLLM"
+
+# For LM Studio
+python llm_load_test.py --api-type lmstudio --host 127.0.0.1:1234 --prompts prompts.txt --users 20 --model "local-model" --llm-provider "LM Studio"
+```
+
+That's it! The tool will automatically test with 5, 10, 15, and 20 users, and save results to `results/<timestamp>/` including a CSV file and a Markdown summary.
 
 ## Supported Backends
 
@@ -166,6 +198,7 @@ python llm_load_test.py --prompts my_prompts.txt --users 25 --model "llama2,mist
 | `--prompts` | Path to prompts file | `--prompts customer_prompts.txt` |
 | `--users` | Maximum number of users (reached gradually) | `--users 50` |
 | `--model` | Model(s), comma-separated for multiple models | `--model "llama2,mistral"` |
+| `--llm-provider` | LLM Provider name for documentation | `--llm-provider "Ollama"` |
 
 ### Optional Parameters
 
@@ -179,7 +212,7 @@ python llm_load_test.py --prompts my_prompts.txt --users 25 --model "llama2,mist
 | `--pause-max` | 30.0 | Maximum pause between messages (seconds) | `--pause-max 60.0` |
 | `--step-size` | 5 | Step size for user increase | `--step-size 10` |
 | `--test-duration` | 300 | Duration of active request phase per step (seconds) | `--test-duration 600` |
-| `--output` | Auto | CSV filename for export | `--output results.csv` |
+| `--output` | results/TIMESTAMP/ | Optional: Custom CSV filename (disables folder creation and summary.md) | `--output results.csv` |
 
 ## Examples
 
@@ -191,6 +224,7 @@ python llm_load_test.py \
   --prompts prompts.txt \
   --users 30 \
   --model llama2 \
+  --llm-provider "Ollama" \
   --gpu "RTX A2000"
 ```
 
@@ -202,6 +236,7 @@ python llm_load_test.py \
   --prompts prompts.txt \
   --users 30 \
   --model "meta-llama/Llama-2-7b-chat-hf" \
+  --llm-provider "vLLM" \
   --gpu "A100"
 ```
 
@@ -213,6 +248,7 @@ python llm_load_test.py \
   --prompts prompts.txt \
   --users 20 \
   --model "local-model" \
+  --llm-provider "LM Studio" \
   --gpu "RTX 4090"
 ```
 
@@ -223,7 +259,8 @@ python llm_load_test.py \
   --host 127.0.0.1:8080 \
   --prompts prompts.txt \
   --users 15 \
-  --model "llama-2-7b-chat"
+  --model "llama-2-7b-chat" \
+  --llm-provider "llama.cpp"
 ```
 
 ### Multi-Model Comparison
@@ -233,6 +270,7 @@ python llm_load_test.py \
   --prompts customer_prompts.txt \
   --users 30 \
   --model "llama2,mistral,codellama" \
+  --llm-provider "Ollama" \
   --gpu "RTX A2000"
 ```
 
@@ -243,6 +281,7 @@ python llm_load_test.py \
   --prompts prompts.txt \
   --users 40 \
   --model "llama2,mistral" \
+  --llm-provider "Ollama" \
   --pause-min 1 \
   --pause-max 5 \
   --step-size 10 \
@@ -256,6 +295,7 @@ python llm_load_test.py \
   --prompts support_prompts.txt \
   --users 25 \
   --model codellama \
+  --llm-provider "Ollama" \
   --host 192.168.x.x:11434 \
   --test-duration 600 \
   --gpu "V100" \
@@ -266,18 +306,80 @@ python llm_load_test.py \
 
 **Power Users (fast interaction):**
 ```bash
-python llm_load_test.py --prompts prompts.txt --users 20 --model "llama2,mistral" --pause-min 1 --pause-max 5 --gpu "RTX 4090"
+python llm_load_test.py --prompts prompts.txt --users 20 --model "llama2,mistral" --llm-provider "Ollama" --pause-min 1 --pause-max 5 --gpu "RTX 4090"
 ```
 
 **Normal Office Users (standard):**
 ```bash
-python llm_load_test.py --prompts prompts.txt --users 30 --model llama2 --gpu "RTX A2000"
+python llm_load_test.py --prompts prompts.txt --users 30 --model llama2 --llm-provider "Ollama" --gpu "RTX A2000"
 ```
 
 **Thoughtful Users (long pauses):**
 ```bash
-python llm_load_test.py --prompts prompts.txt --users 15 --model llama2 --pause-min 10 --pause-max 60 --gpu "RTX A2000"
+python llm_load_test.py --prompts prompts.txt --users 15 --model llama2 --llm-provider "Ollama" --pause-min 10 --pause-max 60 --gpu "RTX A2000"
 ```
+
+## Output Files
+
+The tool automatically creates a timestamped folder for each test run with comprehensive results.
+
+### Directory Structure
+
+```
+results/
+├── 20250105_143022/
+│   ├── results.csv
+│   └── summary.md
+├── 20250105_150815/
+│   ├── results.csv
+│   └── summary.md
+```
+
+### results.csv
+
+Contains detailed metrics for all test steps:
+- Users, Model, LLM_Provider, GPU
+- Avg_Antwortzeit, Avg_TTFT, Max_Antwortzeit, Min_Antwortzeit
+- Fehlerrate, CPU_Prozent, Memory_Prozent
+- Total_Requests, Erfolgreiche_Requests, Fehlgeschlagene_Requests
+- Testdauer, Empfehlung
+
+Perfect for importing into Excel, Google Sheets, or data analysis tools.
+
+### summary.md
+
+A human-readable Markdown report containing:
+
+**Test Configuration:**
+- Timestamp, LLM Provider, API type, base URL
+- Models tested, GPU used
+- Test duration and pause times
+- User step configuration
+
+**Results per Model:**
+- Formatted tables with all metrics
+- Performance summary for each model
+- Best performance level identified
+
+**Overall Summary:**
+- Total requests (successful/failed)
+- Average TTFT across all tests
+- Overall error rate
+
+**Recommendations:**
+- Recommended maximum concurrent users
+- Performance assessment at that load
+- Warnings if system is overloaded
+
+### Manual CSV Export
+
+If you want to save results to a specific location without the folder structure:
+
+```bash
+python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --output my_results.csv
+```
+
+This will save only the CSV file without creating a results folder or summary.md.
 
 ## Prompts File
 
@@ -443,98 +545,6 @@ In the table, you can directly compare different models:
 - **mistral with 10 users**: ✅ Good - Optimal production range
 - **llama2 with 15 users**: ❌ Overloaded - Capacity limit exceeded
 
-### CSV Export for Further Analysis
-
-Results are automatically saved as CSV:
-```
-llm_load_test_llama2_mistral_codellama_YYYYMMDD_HHMMSS.csv
-```
-
-This file contains all metrics including TTFT and GPU information for detailed analysis in Excel, Google Sheets, or other tools.
-
-## Troubleshooting
-
-### Common Problems and Solutions
-
-**Problem: "Cannot connect to API"**
-
-For Ollama:
-```bash
-# Start Ollama service
-ollama serve
-
-# Alternative: Ollama as background process
-nohup ollama serve &
-```
-
-For vLLM:
-```bash
-# Start vLLM server
-python -m vllm.entrypoints.openai.api_server --model <model-path> --port 8000
-```
-
-For LM Studio:
-- Open LM Studio GUI
-- Go to Developer tab
-- Start the local server
-
-For llama.cpp:
-```bash
-# Start llama.cpp server
-./server -m <model-path> --port 8080
-```
-
-**Problem: "Timeout after 120 seconds"**
-- Reduce the number of concurrent users
-- Use a faster model
-- Check server resources
-- Increase timeout in the code if needed
-
-**Problem: "HTTP error 404"**
-- Check model name is correct for your backend
-- For Ollama: `ollama list`
-- For vLLM: Ensure model is loaded
-- For LM Studio: Check loaded model in GUI
-
-**Problem: Very slow response times**
-```bash
-# Check server resources
-htop
-nvidia-smi  # for GPU usage
-
-# Check logs (depends on backend)
-# Ollama:
-journalctl -u ollama -f
-
-# vLLM/others: check their specific log files
-```
-
-### Network Debugging
-
-**Test API reachability:**
-```bash
-# Ollama
-curl http://127.0.0.1:11434/api/tags
-
-# vLLM/LM Studio/llama.cpp (OpenAI-compatible)
-curl http://127.0.0.1:8000/v1/models
-
-# Remote test
-curl http://192.168.x.x:<port>/v1/models
-```
-
-**Firewall issues:**
-```bash
-# Open port (Ubuntu/Debian)
-sudo ufw allow 11434  # Ollama default
-sudo ufw allow 8000   # vLLM default
-sudo ufw allow 1234   # LM Studio default
-sudo ufw allow 8080   # llama.cpp default
-
-# Check port status
-netstat -tlnp | grep <port>
-```
-
 ## Best Practices
 
 ### Test Planning
@@ -542,28 +552,28 @@ netstat -tlnp | grep <port>
 **1. Gradual Increase (automatic):**
 ```bash
 # The tool automatically runs tests with 5, 10, 15, 20, 25 users
-python llm_load_test.py --prompts prompts.txt --users 25 --model llama2
+python llm_load_test.py --prompts prompts.txt --users 25 --model llama2 --llm-provider "Ollama"
 ```
 
 **2. Multi-Model Comparison:**
 ```bash
 # Compare different models under identical conditions
-python llm_load_test.py --prompts prompts.txt --users 25 --model "llama2,mistral,codellama" --gpu "RTX A2000"
+python llm_load_test.py --prompts prompts.txt --users 25 --model "llama2,mistral,codellama" --llm-provider "Ollama" --gpu "RTX A2000"
 
 # Find the best model for your hardware
-python llm_load_test.py --prompts prompts.txt --users 30 --model "llama2,mistral" --gpu "RTX 4090"
+python llm_load_test.py --prompts prompts.txt --users 30 --model "llama2,mistral" --llm-provider "vLLM" --gpu "RTX 4090"
 ```
 
 **3. Different Pause Times:**
 ```bash
 # Fast users (stress test)
-python llm_load_test.py --prompts prompts.txt --users 40 --model llama2 --pause-min 1 --pause-max 3
+python llm_load_test.py --prompts prompts.txt --users 40 --model llama2 --llm-provider "Ollama" --pause-min 1 --pause-max 3
 
 # Realistic users
-python llm_load_test.py --prompts prompts.txt --users 30 --model llama2 --pause-min 3 --pause-max 30
+python llm_load_test.py --prompts prompts.txt --users 30 --model llama2 --llm-provider "Ollama" --pause-min 3 --pause-max 30
 
 # Slow users
-python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --pause-min 30 --pause-max 120
+python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --llm-provider "Ollama" --pause-min 30 --pause-max 120
 ```
 
 ### Monitoring During Tests
@@ -615,7 +625,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 ### Documentation of Results
 
-The tool automatically creates a clear results table and saves all data as CSV. Example of a typical multi-model evaluation:
+The tool automatically creates a timestamped results folder with CSV data and Markdown summary (see [Output Files](#output-files)). Example of a typical multi-model evaluation:
 
 | Users | Model | GPU | TTFT | Avg. Time | Error Rate | CPU % | Recommendation |
 |-------|-------|-----|------|-----------|------------|-------|----------------|
@@ -629,23 +639,6 @@ The tool automatically creates a clear results table and saves all data as CSV. 
 **Conclusion:** mistral is the most performant model - stable up to 10 users, unstable but usable up to 20 users.
 
 ---
-
-## Conclusion
-
-This automated load testing tool helps you quickly and systematically determine the optimal capacity of your LLM API installation. Through gradual increase of user count and automatic result evaluation, you get a clear overview of performance limits and can make informed decisions for the production environment.
-
-**Main Benefits:**
-- 🔄 **Multi-Backend**: Works with Ollama, vLLM, LM Studio, llama.cpp, OpenAI, and more
-- 🚀 **Automated**: No manual tests required
-- 📊 **Clear**: Clear result tables and CSV export
-- 🎯 **Realistic**: Real prompts and realistic pause times
-- ⚡ **Efficient**: All tests in one run
-- 🔀 **Multi-Model**: Direct comparison of different models
-- 💾 **Documented**: GPU and hardware information is saved
-- 📈 **Actionable**: Directly implementable capacity recommendations
-- ⚙️ **Flexible**: Configure via .env or command-line
-
-For questions or problems, you can adjust the parameters and run smaller tests to adapt the tool to your specific requirements.
 
 ## ⚠️ Disclaimer
 
