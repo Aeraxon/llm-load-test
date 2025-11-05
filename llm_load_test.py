@@ -545,7 +545,15 @@ def main():
             print(f"TESTE MODELL: {model}")
             print(f"{'='*80}")
 
+            model_overloaded = False  # Flag für Überlastung dieses Modells
+
             for user_count in user_steps:
+                # Überspringe weitere Tests, wenn Modell bereits überlastet
+                if model_overloaded:
+                    step_counter += 1
+                    print(f"\n[Schritt {step_counter}/{total_steps}] Überspringe {user_count} Benutzer mit {model} (Modell bereits überlastet bei weniger Benutzern)")
+                    continue
+
                 step_counter += 1
                 print(f"\n[Schritt {step_counter}/{total_steps}] Teste {user_count} Benutzer mit {model}...")
 
@@ -557,6 +565,12 @@ def main():
 
                 if result:
                     results.append(result)
+
+                    # Prüfe ob Test wegen Überlastung abgebrochen wurde
+                    if result.error_rate > 30:
+                        model_overloaded = True
+                        print(f"\n⚠️ Modell {model} ist bei {user_count} Benutzern überlastet.")
+                        print(f"Weitere Tests mit mehr Benutzern für dieses Modell werden übersprungen.\n")
 
                 # Kurze Pause zwischen Tests
                 if step_counter < total_steps:
