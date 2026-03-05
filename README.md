@@ -115,13 +115,21 @@ When `--workload-mix` includes a long-context percentage, the long-context users
 
 ### User Profiles
 
-Three behavioral profiles are mixed proportionally via `--profile-mix` (Power:Normal:Occasional, default `40:40:20`). Profiles apply to all slices in a workload mix:
+Three behavioral profiles are mixed proportionally via `--profile-mix` (Power:Normal:Occasional, default `40:40:20`). Profiles apply to all slices in a workload mix.
+
+**Power user** — someone who uses the assistant as a core work tool all day: they fire off the next message as soon as they've read the reply (2–5 s pause), always run the maximum number of turns, and keep multiple long conversations going in parallel. Heaviest load per user.
+
+**Normal user** — typical knowledge worker who turns to the assistant a few times per hour: reads the reply, does something else, comes back (15–45 s pause). Turn count varies — sometimes a quick one-shot question, sometimes a longer back-and-forth.
+
+**Occasional user** — someone who drops in once in a while for a specific task (e.g. drafting an email): long pauses between sessions (60–120 s), only the minimum number of turns. Lightest load per user.
 
 | Profile | Pause Between Sessions | Turns per Session |
 |---------|----------------------|-------------------|
 | Power | 2–5 s | `--turns-max` (fixed) |
 | Normal | 15–45 s | random between `--turns-min` and `--turns-max` |
 | Occasional | 60–120 s | `--turns-min` (fixed) |
+
+The default mix of `40:40:20` (Power:Normal:Occasional) reflects a typical enterprise chat deployment where a significant share of users are heavy adopters. Adjust with `--profile-mix` to match your actual user distribution — e.g. `10:60:30` for a broader rollout where most users are light adopters.
 
 ### Metrics
 
