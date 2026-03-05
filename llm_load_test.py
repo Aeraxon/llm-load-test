@@ -142,11 +142,11 @@ def assign_profiles(user_count, profile_mix_str, turns_min, turns_max):
 
     profiles = []
     for _ in range(power_count):
-        profiles.append({"name": "power", "pause_min": 2, "pause_max": 5, "turns": turns_max})
+        profiles.append({"name": "power", "turns": turns_max})
     for _ in range(normal_count):
-        profiles.append({"name": "normal", "pause_min": 15, "pause_max": 45, "turns": (turns_min, turns_max)})
+        profiles.append({"name": "normal", "turns": (turns_min, turns_max)})
     for _ in range(occasional_count):
-        profiles.append({"name": "occasional", "pause_min": 60, "pause_max": 120, "turns": turns_min})
+        profiles.append({"name": "occasional", "turns": turns_min})
 
     return profiles
 
@@ -217,12 +217,6 @@ def llm_chat_multiturn(model, prompts, system_prompts, user_id, profile,
                 error_count.value += 1
                 print(f"[User {user_id}|turn {turn+1}] ✗ {error} - restarting session")
                 break  # abandon this session on error, start fresh next loop
-
-        # Pause between sessions according to profile
-        remaining = end_time - time.time()
-        if remaining > 0:
-            pause = random.uniform(profile["pause_min"], profile["pause_max"])
-            time.sleep(min(pause, remaining))
 
 def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft):
     """Generates a recommendation based on TTFT and error rate"""
@@ -295,7 +289,7 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                 p = multiprocessing.Process(
                     target=llm_chat_continuous,
                     args=(model, prompts, user_id,
-                          profile['pause_min'], profile['pause_max'],
+                          pause_min, pause_max,
                           api_type, base_url, api_key, test_duration)
                 )
             elif user_id < n_single + n_multi:

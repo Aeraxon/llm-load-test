@@ -117,19 +117,41 @@ When `--workload-mix` includes a long-context percentage, the long-context users
 
 Three behavioral profiles are mixed proportionally via `--profile-mix` (Power:Normal:Occasional, default `40:40:20`). Profiles apply to all slices in a workload mix.
 
-**Power user** — someone who uses the assistant as a core work tool all day: they fire off the next message as soon as they've read the reply (2–5 s pause), always run the maximum number of turns, and keep multiple long conversations going in parallel. Heaviest load per user.
+The tool measures **maximum concurrent users** — how many people can be actively chatting at the same time before quality degrades. All simulated users therefore run continuously with no idle time between sessions: as soon as one conversation ends, the next starts immediately. This models the steady-state load of N people who are all actively mid-conversation right now.
 
-**Normal user** — typical knowledge worker who turns to the assistant a few times per hour: reads the reply, does something else, comes back (15–45 s pause). Turn count varies — sometimes a quick one-shot question, sometimes a longer back-and-forth.
+What the profiles control is the **session depth** — how much context a user brings per session, which directly affects KV-cache pressure, prompt tokens, and GPU memory:
 
-**Occasional user** — someone who drops in once in a while for a specific task (e.g. drafting an email): long pauses between sessions (60–120 s), only the minimum number of turns. Lightest load per user.
+**Power user** — heavy context, maximum turns per session. Models someone who writes long follow-up prompts, shares documents, and keeps threads going as long as possible. Hardest per-user load on the model.
 
-| Profile | Pause Between Sessions | Turns per Session |
-|---------|----------------------|-------------------|
-| Power | 2–5 s | `--turns-max` (fixed) |
-| Normal | 15–45 s | random between `--turns-min` and `--turns-max` |
-| Occasional | 60–120 s | `--turns-min` (fixed) |
+**Normal user** — medium depth, random turn count between min and max. Typical back-and-forth: ask something, get an answer, ask a follow-up.
 
-The default mix of `40:40:20` (Power:Normal:Occasional) reflects a typical enterprise chat deployment where a significant share of users are heavy adopters. Adjust with `--profile-mix` to match your actual user distribution — e.g. `10:60:30` for a broader rollout where most users are light adopters.
+**Occasional user** — shallow sessions, minimum turns. One or two short questions, then the conversation is done. Lightest per-user load.
+
+| Profile | Turns per Session |
+|---------|-------------------|
+| Power | `--turns-max` (fixed) |
+| Normal | random between `--turns-min` and `--turns-max` |
+| Occasional | `--turns-min` (fixed) |
+
+The default mix of `40:40:20` (Power:Normal:Occasional) is a conservative assumption that skews toward heavy users. Adjust with `--profile-mix` to reflect your actual audience — e.g. `10:60:30` if most users are light adopters.
+
+### From Concurrent Users to Total Employees
+
+Once you know the maximum concurrent users the system can handle, divide by the concurrency factor for your organisation to estimate total supported employees:
+
+```
+max employees = max concurrent users × concurrency factor
+```
+
+A commonly used factor is **12×** — meaning roughly 1 in 12 employees is actively using the assistant at any given moment. This is a reasonable baseline for an enterprise rollout with high adoption; adjust based on your actual usage patterns:
+
+| Adoption Level | Concurrency Factor | Example: 30 concurrent users |
+|----------------|-------------------|-------------------------------|
+| Very high adoption | 6× | ~180 employees |
+| Typical enterprise | 12× | ~360 employees |
+| Low / gradual rollout | 20× | ~600 employees |
+
+The summary report includes the maximum concurrent users tested at < 10% error rate, which you can plug directly into this formula.
 
 ### Metrics
 
@@ -383,8 +405,8 @@ python llm_load_test.py \
 | `--api-type` | `API_TYPE` | `ollama` | `ollama`, `vllm`, `lmstudio`, `llamacpp`, `openai` |
 | `--host` | `API_BASE_URL` | `127.0.0.1:11434` | API host and port |
 | `--api-key` | `API_KEY` | None | API key for authenticated backends |
-| `--pause-min` | `PAUSE_MIN` | `3.0` | Minimum inter-session pause in seconds |
-| `--pause-max` | `PAUSE_MAX` | `30.0` | Maximum inter-session pause in seconds |
+| `--pause-min` | `PAUSE_MIN` | `3.0` | Pause between requests in single-turn mode (multi-turn: no pause) |
+| `--pause-max` | `PAUSE_MAX` | `30.0` | Pause between requests in single-turn mode (multi-turn: no pause) |
 | `--step-size` | `STEP_SIZE` | `5` | User count increment per step |
 | `--test-duration` | `TEST_DURATION` | `300` | Duration per step in seconds |
 | `--output` | `OUTPUT` | auto | Custom CSV filename; disables auto folder + `summary.md` |
