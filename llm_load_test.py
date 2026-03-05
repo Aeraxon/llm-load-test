@@ -17,6 +17,15 @@ from api_adapters import create_adapter
 # Load environment variables from .env file
 load_dotenv()
 
+def resolve_arg(cli_value, env_key, default=None, cast=None):
+    """Return CLI value if given, else .env value, else default. cast applied to env string."""
+    if cli_value is not None:
+        return cli_value
+    env_val = os.getenv(env_key)
+    if env_val is not None:
+        return cast(env_val) if cast else env_val
+    return default
+
 @dataclass
 class TestResult:
     """Data class for test results"""
@@ -243,14 +252,19 @@ def check_api_connection(adapter):
 def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duration,
                   api_type, base_url, api_key, gpu_name, llm_provider,
                   mode='multi-turn', system_prompts_list=None,
-                  turns_min=3, turns_max=7, profiles=None):
+                  turns_min=3, turns_max=7, profiles=None,
+                  workload_mix_tuple=None, lc_prompts=None, lc_turns_max=2):
     """Runs a load test with a given number of simulated users"""
     reset_counters()
 
     print(f"\n{'='*60}")
     print(f"Starting test with {user_count} users...")
     print(f"Test duration: {test_duration/60:.1f} minutes")
-    print(f"Mode: {mode}")
+    if workload_mix_tuple:
+        s, m, lc = workload_mix_tuple
+        print(f"Workload mix: {s}% single-turn / {m}% multi-turn / {lc}% long-context")
+    else:
+        print(f"Mode: {mode}")
     print(f"{'='*60}")
 
     monitor = SystemMonitor()
@@ -259,23 +273,45 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
     processes = []
     start_time = time.time()
 
+    # Determine slice sizes
+    if workload_mix_tuple:
+        single_pct, multi_pct, lc_pct = workload_mix_tuple
+        n_single = int(user_count * single_pct / 100)
+        n_lc     = int(user_count * lc_pct   / 100)
+        n_multi  = user_count - n_single - n_lc
+    else:
+        n_single = user_count if mode == 'single-turn' else 0
+        n_multi  = user_count if mode == 'multi-turn'  else 0
+        n_lc     = 0
+
+    # Profiles are always assigned so single-turn users also get profile-based pauses
+    if profiles is None:
+        profiles = assign_profiles(user_count, '40:40:20', turns_min, turns_max)
+
     try:
         for user_id in range(user_count):
-            if mode == 'multi-turn':
-                profile = profiles[user_id] if profiles else {
-                    "name": "normal", "pause_min": pause_min, "pause_max": pause_max,
-                    "turns": (turns_min, turns_max)
-                }
+            profile = profiles[user_id]
+            if user_id < n_single:
+                p = multiprocessing.Process(
+                    target=llm_chat_continuous,
+                    args=(model, prompts, user_id,
+                          profile['pause_min'], profile['pause_max'],
+                          api_type, base_url, api_key, test_duration)
+                )
+            elif user_id < n_single + n_multi:
                 p = multiprocessing.Process(
                     target=llm_chat_multiturn,
                     args=(model, prompts, system_prompts_list, user_id, profile,
                           turns_min, turns_max, api_type, base_url, api_key, test_duration)
                 )
             else:
+                # Long-context slice: use lc_prompts pool, capped turn count
+                lc_profile = {**profile, 'turns': (1, lc_turns_max)}
                 p = multiprocessing.Process(
-                    target=llm_chat_continuous,
-                    args=(model, prompts, user_id, pause_min, pause_max,
-                          api_type, base_url, api_key, test_duration)
+                    target=llm_chat_multiturn,
+                    args=(model, lc_prompts or prompts, system_prompts_list, user_id,
+                          lc_profile, 1, lc_turns_max, api_type, base_url, api_key,
+                          test_duration)
                 )
             p.start()
             processes.append(p)
@@ -471,7 +507,9 @@ def save_results_to_markdown(results: List[TestResult], filename: str, test_conf
             else:
                 f.write("- ⚠️ All tests showed high error rates (>10%). System is overloaded.\n")
 
-            if test_config.get('mode') == 'multi-turn':
+            if test_config.get('workload_mix'):
+                f.write("\n> **Note:** Mixed workload (single-turn / multi-turn / long-context). Multi-turn and long-context results reflect realistic chat load; apply a 0.6–0.7x factor vs. single-turn benchmarks.\n")
+            elif test_config.get('mode') == 'multi-turn':
                 f.write("\n> **Note:** Results reflect realistic multi-turn chat load. Apply a 0.6–0.7 correction factor compared to single-turn benchmarks.\n")
 
             f.write("\n")
@@ -492,14 +530,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="Step-by-step load testing for LLM APIs (Ollama, vLLM, LM Studio, llama.cpp, etc.)"
     )
-    parser.add_argument("--prompts", type=str, required=True,
-                        help="Path to prompts file")
-    parser.add_argument("--users", type=int, required=True,
-                        help="Maximum number of users (reached incrementally)")
-    parser.add_argument("--model", type=str, required=True,
-                        help="Model(s), comma-separated for multiple models")
-    parser.add_argument("--llm-provider", type=str, required=True,
-                        help="LLM provider name (e.g. 'Ollama', 'vLLM', 'LM Studio')")
+    parser.add_argument("--prompts", type=str, required=False, default=None,
+                        help="Path to prompts file (env: PROMPTS_FILE)")
+    parser.add_argument("--users", type=int, required=False, default=None,
+                        help="Maximum number of users (env: USERS)")
+    parser.add_argument("--model", type=str, required=False, default=None,
+                        help="Model(s), comma-separated for multiple models (env: MODEL)")
+    parser.add_argument("--llm-provider", type=str, required=False, default=None,
+                        help="LLM provider name, e.g. 'Ollama', 'vLLM' (env: LLM_PROVIDER)")
     parser.add_argument("--gpu", type=str, default="Unknown",
                         help="GPU label for documentation (default: Unknown)")
     parser.add_argument("--pause-min", type=float, default=3.0,
@@ -526,48 +564,96 @@ def main():
                         help="Minimum turns per multi-turn session (default: 3)")
     parser.add_argument("--turns-max", type=int, default=7,
                         help="Maximum turns per multi-turn session (default: 7)")
-    parser.add_argument("--profile-mix", type=str, default="40:40:20",
-                        help="Power:Normal:Occasional user mix, must sum to 100 (default: 40:40:20)")
+    parser.add_argument("--profile-mix", type=str, default=None,
+                        help="Power:Normal:Occasional user mix, must sum to 100 (default: 40:40:20, env: PROFILE_MIX)")
+    parser.add_argument("--workload-mix", type=str, default=None,
+                        help="single-turn:multi-turn:long-context percentages summing to 100 (env: WORKLOAD_MIX). Overrides --mode when set.")
+    parser.add_argument("--long-context-prompts", type=str, default=None,
+                        help="Path to long-context prompts file (env: LONG_CONTEXT_PROMPTS_FILE)")
+    parser.add_argument("--lc-turns-max", type=int, default=None,
+                        help="Max turns for long-context slice (default: 2, env: LC_TURNS_MAX)")
 
     args = parser.parse_args()
 
-    # Validate --profile-mix
-    try:
-        profile_parts = [int(x) for x in args.profile_mix.split(':')]
-        if len(profile_parts) != 3 or sum(profile_parts) != 100:
-            print(f"Error: --profile-mix must be three integers summing to 100 (e.g. '40:40:20'), got '{args.profile_mix}'")
-            return
-    except ValueError:
-        print(f"Error: --profile-mix must be three colon-separated integers, got '{args.profile_mix}'")
-        return
-
-    # Validate turns range
-    if args.turns_min > args.turns_max:
-        print(f"Error: --turns-min ({args.turns_min}) must be <= --turns-max ({args.turns_max})")
-        return
+    # Resolve all args: CLI > .env > default
+    prompts_file  = resolve_arg(args.prompts,       'PROMPTS_FILE')
+    users         = resolve_arg(args.users,          'USERS',          cast=int)
+    model_str     = resolve_arg(args.model,          'MODEL')
+    llm_provider  = resolve_arg(args.llm_provider,  'LLM_PROVIDER')
+    gpu           = resolve_arg(args.gpu,            'GPU',            default='Unknown')
+    mode          = resolve_arg(args.mode,           'MODE',           default='multi-turn')
+    system_prompts_path = resolve_arg(args.system_prompts, 'SYSTEM_PROMPTS_FILE')
+    turns_min     = resolve_arg(args.turns_min,     'TURNS_MIN',      default=3,    cast=int)
+    turns_max     = resolve_arg(args.turns_max,     'TURNS_MAX',      default=7,    cast=int)
+    profile_mix   = resolve_arg(args.profile_mix,   'PROFILE_MIX',    default='40:40:20')
+    workload_mix  = resolve_arg(args.workload_mix,  'WORKLOAD_MIX')
+    lc_prompts_file = resolve_arg(args.long_context_prompts, 'LONG_CONTEXT_PROMPTS_FILE')
+    lc_turns_max  = resolve_arg(args.lc_turns_max,  'LC_TURNS_MAX',   default=2,    cast=int)
+    pause_min     = resolve_arg(args.pause_min,     'PAUSE_MIN',      default=3.0,  cast=float)
+    pause_max     = resolve_arg(args.pause_max,     'PAUSE_MAX',      default=30.0, cast=float)
+    step_size     = resolve_arg(args.step_size,     'STEP_SIZE',      default=5,    cast=int)
+    test_duration = resolve_arg(args.test_duration, 'TEST_DURATION',  default=300,  cast=int)
+    output        = resolve_arg(args.output,        'OUTPUT')
 
     # Resolve API configuration
     api_type = args.api_type or os.getenv('API_TYPE', 'ollama')
-    api_key = args.api_key or os.getenv('API_KEY')
-
+    api_key  = args.api_key  or os.getenv('API_KEY')
     if args.host:
         base_url = args.host if args.host.startswith(('http://', 'https://')) else f"http://{args.host}"
     else:
-        env_url = os.getenv('API_BASE_URL')
-        base_url = env_url if env_url else "http://127.0.0.1:11434"
+        base_url = os.getenv('API_BASE_URL', 'http://127.0.0.1:11434')
 
-    models = [model.strip() for model in args.model.split(',') if model.strip()]
+    # Validate required fields
+    missing = []
+    if not prompts_file:  missing.append('--prompts / PROMPTS_FILE')
+    if users is None:     missing.append('--users / USERS')
+    if not model_str:     missing.append('--model / MODEL')
+    if not llm_provider:  missing.append('--llm-provider / LLM_PROVIDER')
+    if missing:
+        print("Error: the following required arguments are missing (set via CLI or .env):")
+        for m in missing:
+            print(f"  {m}")
+        return
 
+    # Validate --profile-mix
+    try:
+        profile_parts = [int(x) for x in profile_mix.split(':')]
+        if len(profile_parts) != 3 or sum(profile_parts) != 100:
+            print(f"Error: profile-mix must be three integers summing to 100, got '{profile_mix}'")
+            return
+    except ValueError:
+        print(f"Error: profile-mix must be three colon-separated integers, got '{profile_mix}'")
+        return
+
+    # Validate turns range
+    if turns_min > turns_max:
+        print(f"Error: turns-min ({turns_min}) must be <= turns-max ({turns_max})")
+        return
+
+    # Parse --workload-mix
+    workload_mix_tuple = None
+    if workload_mix:
+        try:
+            wm_parts = [int(x) for x in workload_mix.split(':')]
+            if len(wm_parts) != 3 or sum(wm_parts) != 100:
+                print(f"Error: workload-mix must be three integers summing to 100, got '{workload_mix}'")
+                return
+            workload_mix_tuple = tuple(wm_parts)
+        except ValueError:
+            print(f"Error: workload-mix must be three colon-separated integers, got '{workload_mix}'")
+            return
+
+    models = [m.strip() for m in model_str.split(',') if m.strip()]
     if not models:
         print("Error: No valid models specified!")
         return
 
-    if args.pause_min > args.pause_max:
-        print("Error: --pause-min must not be greater than --pause-max!")
+    if pause_min > pause_max:
+        print("Error: pause-min must not be greater than pause-max!")
         return
 
-    if args.users <= 0 or args.step_size <= 0:
-        print("Error: --users and --step-size must be greater than 0!")
+    if users <= 0 or step_size <= 0:
+        print("Error: users and step-size must be greater than 0!")
         return
 
     try:
@@ -585,10 +671,10 @@ def main():
     print(f"✓ Connected to {api_type.upper()} API")
 
     try:
-        prompts = load_prompts(args.prompts)
-        print(f"✓ Loaded {len(prompts)} prompts from {args.prompts}")
+        prompts = load_prompts(prompts_file)
+        print(f"✓ Loaded {len(prompts)} prompts from {prompts_file}")
     except FileNotFoundError:
-        print(f"Error: Prompts file {args.prompts} not found!")
+        print(f"Error: Prompts file {prompts_file} not found!")
         return
 
     if len(prompts) == 0:
@@ -597,36 +683,53 @@ def main():
 
     # Load system prompts if provided
     system_prompts_list = None
-    if args.system_prompts:
+    if system_prompts_path:
         try:
-            system_prompts_list = load_prompts(args.system_prompts)
-            print(f"✓ Loaded {len(system_prompts_list)} system prompts from {args.system_prompts}")
+            system_prompts_list = load_prompts(system_prompts_path)
+            print(f"✓ Loaded {len(system_prompts_list)} system prompts from {system_prompts_path}")
         except FileNotFoundError:
-            print(f"Error: System prompts file {args.system_prompts} not found!")
+            print(f"Error: System prompts file {system_prompts_path} not found!")
             return
+
+    # Load long-context prompts if needed
+    lc_prompts = None
+    if workload_mix_tuple and workload_mix_tuple[2] > 0:
+        if lc_prompts_file:
+            try:
+                lc_prompts = load_prompts(lc_prompts_file)
+                print(f"✓ Loaded {len(lc_prompts)} long-context prompts from {lc_prompts_file}")
+            except FileNotFoundError:
+                print(f"Error: Long-context prompts file {lc_prompts_file} not found!")
+                return
+        else:
+            print("Warning: workload-mix has long-context% > 0 but no --long-context-prompts file set. Using main prompts for long-context slice.")
 
     print(f"\nSTARTING STEP-BY-STEP LOAD TEST")
     print(f"API Type: {api_type.upper()}")
     print(f"Base URL: {base_url}")
     print(f"Models: {', '.join(models)}")
-    print(f"GPU: {args.gpu}")
-    print(f"Mode: {args.mode}")
-    print(f"Max users: {args.users}")
-    print(f"Step size: {args.step_size}")
-    print(f"Test duration per step: {args.test_duration/60:.1f} minutes")
-    print(f"Pause times: {args.pause_min}–{args.pause_max} seconds")
-    if args.mode == 'multi-turn':
-        print(f"Profile mix (Power:Normal:Occasional): {args.profile_mix}")
-        print(f"Turns per session: {args.turns_min}–{args.turns_max}")
+    print(f"GPU: {gpu}")
+    if workload_mix_tuple:
+        s, m, lc = workload_mix_tuple
+        print(f"Workload mix: {s}% single-turn / {m}% multi-turn / {lc}% long-context")
+    else:
+        print(f"Mode: {mode}")
+    print(f"Max users: {users}")
+    print(f"Step size: {step_size}")
+    print(f"Test duration per step: {test_duration/60:.1f} minutes")
+    print(f"Pause times: {pause_min}–{pause_max} seconds")
+    if workload_mix_tuple or mode == 'multi-turn':
+        print(f"Profile mix (Power:Normal:Occasional): {profile_mix}")
+        print(f"Turns per session: {turns_min}–{turns_max}")
 
     results = []
-    user_steps = list(range(args.step_size, args.users + 1, args.step_size))
+    user_steps = list(range(step_size, users + 1, step_size))
 
-    if args.users not in user_steps:
-        user_steps.append(args.users)
+    if users not in user_steps:
+        user_steps.append(users)
 
     total_steps = len(user_steps) * len(models)
-    estimated_total_time = total_steps * args.test_duration / 60
+    estimated_total_time = total_steps * test_duration / 60
 
     print(f"Planned steps: {user_steps}")
     print(f"Estimated total duration: {estimated_total_time:.1f} minutes")
@@ -651,19 +754,20 @@ def main():
                 step_counter += 1
                 print(f"\n[Step {step_counter}/{total_steps}] Testing {user_count} users with {model}...")
 
-                profiles = None
-                if args.mode == 'multi-turn':
-                    profiles = assign_profiles(user_count, args.profile_mix, args.turns_min, args.turns_max)
+                profiles = assign_profiles(user_count, profile_mix, turns_min, turns_max)
 
                 result = run_load_test(
                     model, prompts, user_count,
-                    args.pause_min, args.pause_max,
-                    args.test_duration, api_type, base_url, api_key, args.gpu, args.llm_provider,
-                    mode=args.mode,
+                    pause_min, pause_max,
+                    test_duration, api_type, base_url, api_key, gpu, llm_provider,
+                    mode=mode,
                     system_prompts_list=system_prompts_list,
-                    turns_min=args.turns_min,
-                    turns_max=args.turns_max,
-                    profiles=profiles
+                    turns_min=turns_min,
+                    turns_max=turns_max,
+                    profiles=profiles,
+                    workload_mix_tuple=workload_mix_tuple,
+                    lc_prompts=lc_prompts,
+                    lc_turns_max=lc_turns_max,
                 )
 
                 if result:
@@ -678,10 +782,11 @@ def main():
                     print("Pause between tests (10 seconds)...")
                     time.sleep(10)
 
+
         print_results_table(results)
 
-        if args.output:
-            save_results_to_file(results, args.output)
+        if output:
+            save_results_to_file(results, output)
         else:
             result_dir, timestamp_str = create_results_directory()
 
@@ -691,19 +796,20 @@ def main():
             md_filename = os.path.join(result_dir, "summary.md")
             test_config = {
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'llm_provider': args.llm_provider,
+                'llm_provider': llm_provider,
                 'api_type': api_type.upper(),
                 'base_url': base_url,
                 'models': ', '.join(models),
-                'gpu': args.gpu,
-                'mode': args.mode,
-                'test_duration': args.test_duration,
-                'pause_min': args.pause_min,
-                'pause_max': args.pause_max,
+                'gpu': gpu,
+                'mode': mode,
+                'workload_mix': workload_mix,
+                'test_duration': test_duration,
+                'pause_min': pause_min,
+                'pause_max': pause_max,
                 'user_steps': user_steps,
-                'profile_mix': args.profile_mix,
-                'turns_min': args.turns_min,
-                'turns_max': args.turns_max,
+                'profile_mix': profile_mix,
+                'turns_min': turns_min,
+                'turns_max': turns_max,
             }
             save_results_to_markdown(results, md_filename, test_config)
 

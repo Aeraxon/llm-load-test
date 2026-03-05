@@ -106,3 +106,95 @@ Develop a complete performance review framework for a software development team,
 Draft a detailed competitive analysis report structure for a SaaS product entering the project management software market, with sections for market overview, competitor profiles, feature comparison matrix, pricing analysis, and strategic positioning recommendations.
 Write an in-depth guide on SQL query optimization techniques for database administrators, covering index design, query execution plans, common performance anti-patterns, partitioning strategies, and practical examples for each technique.
 Create a thorough employee handbook section on data privacy and information security responsibilities, covering data classification, acceptable use of company systems, remote work security requirements, incident reporting procedures, and consequences for policy violations.
+Review this Python function for potential performance bottlenecks and suggest optimizations with code examples.
+What are the key differences between REST and GraphQL APIs, and when should I choose each for a new project?
+Explain the SOLID principles with a practical example for each one, written for an intermediate developer.
+How do I set up a CI/CD pipeline using GitHub Actions for a Node.js web application with automated testing?
+What are best practices for writing unit tests in Python using pytest, including how to mock external dependencies?
+Describe common Docker networking modes (bridge, host, overlay) and when to use each one in production.
+How can I implement role-based access control (RBAC) in a web application using middleware?
+What are the pros and cons of microservices versus a monolithic architecture for a team of 10 engineers?
+Explain the differences between SQL JOIN types (INNER, LEFT, RIGHT, FULL OUTER) with practical examples.
+How do I debug a memory leak in a Node.js application using built-in diagnostics and heap snapshots?
+What is the difference between authentication and authorization, and how should I implement both in a REST API?
+How should I design a paginated API endpoint for a list of resources with filtering and sorting support?
+Explain database indexing strategies and describe situations where an index can hurt query performance.
+What are the most common security vulnerabilities in web APIs (OWASP API Top 10) and how do I prevent each one?
+How do I implement retry logic with exponential backoff and jitter in a distributed system?
+Explain event-driven architecture and describe scenarios where it is a better fit than synchronous request-response.
+What are best practices for managing secrets and API credentials in a Kubernetes production environment?
+How do I choose between PostgreSQL and MongoDB for a new project, and what questions should guide that decision?
+What is the purpose of a load balancer, and what are the main load-balancing algorithms (round-robin, least-connections, IP hash)?
+Explain the difference between horizontal and vertical scaling, and describe when each approach is appropriate.
+How do I write a production-ready Dockerfile for a Python Flask web application with proper layer caching?
+What is the CAP theorem and how does it influence distributed database design decisions?
+Explain blue-green deployments: how they work, their benefits, and the infrastructure requirements.
+How do I implement structured logging best practices in a microservices architecture with centralized log aggregation?
+What are feature flags, how do they support continuous delivery, and what tools are available to manage them?
+Describe the differences between OAuth 2.0 and OpenID Connect and when to use each.
+How should I structure REST API error responses to be maximally useful for API consumers?
+What are the key differences between Redis and Memcached for application caching, and which should I choose?
+Explain the concept of idempotency in API design, why it matters, and how to implement idempotent endpoints.
+How do I establish a code review process that balances code quality with developer velocity?
+Write a SQL query to find the top 10 customers by total revenue over the last 90 days, including customers with zero orders.
+How do I design a star schema data warehouse for e-commerce sales reporting with proper fact and dimension tables?
+Explain the difference between OLTP and OLAP databases and give examples of workloads suited to each.
+What KPIs should be included in a weekly sales operations dashboard, and how should they be calculated?
+How do I use SQL window functions to calculate running totals, moving averages, and rank within groups?
+What are best practices for validating and cleansing data before loading it into a data warehouse?
+Explain the concept of database normalization and describe situations where intentional denormalization is preferred.
+How do I calculate month-over-month and year-over-year growth rates correctly in SQL?
+What are the most important KPIs for a B2B SaaS business and how should each one be measured?
+How should I design a data model for a multi-tenant SaaS application to ensure proper data isolation?
+Explain the difference between batch processing and stream processing for analytics, with examples of each.
+How do I build a cohort retention analysis in SQL to track user retention over weekly cohorts?
+What are the key elements of an effective business intelligence dashboard for a non-technical executive audience?
+How do I detect and handle outliers in a dataset before using it for KPI reporting?
+Explain the roles of fact tables and dimension tables in a star schema and how they relate to each other.
+How can I automate a weekly management report in Python that pulls from a PostgreSQL database and sends it by email?
+What is A/B testing, and how do I design a statistically valid experiment including sample size calculation?
+How do I calculate customer lifetime value (CLV) for a subscription business using historical transaction data?
+Explain data lineage, why it matters for compliance reporting, and what tools help track it.
+What are the best open-source tools for visualizing data from a PostgreSQL database without a dedicated BI platform?
+How do I write an effective OKR (Objective and Key Results) for a software engineering team for the coming quarter?
+What are the key components of a business case for a major technology investment that will persuade a CFO?
+How should I structure a quarterly business review presentation to make it compelling for senior leadership?
+Describe practical strategies for managing a software development team distributed across three time zones.
+What are effective techniques for running agile retrospectives with a fully remote team?
+How do I create a stakeholder communication plan for a major ERP system migration affecting 500 employees?
+What frameworks can I use to prioritize features in a product backlog when everything feels equally urgent?
+How do I write a risk register for a large IT infrastructure project and keep it current throughout the project?
+What is the difference between a project manager and a product manager, and how do their responsibilities overlap?
+What are best practices for running effective weekly one-on-one meetings with direct reports?
+How do I build a business case for hiring an additional senior engineer on my team?
+What is a RACI matrix, how do I create one, and what mistakes should I avoid?
+How can I improve cross-functional collaboration between an engineering team and a sales team?
+What are strategies for managing a high-performing team through a disruptive organizational restructuring?
+How do I run a thorough post-project retrospective and turn the findings into lasting improvements?
+Explain the difference between Scrum and Kanban, and give guidance on when to use each methodology.
+What are the key elements of an effective vendor management strategy for a portfolio of 15 software suppliers?
+How do I create a meaningful engineering metrics dashboard covering delivery, quality, and developer experience?
+What techniques help managers deliver constructive critical feedback in a way that motivates rather than deflates?
+How do I develop a succession plan for key technical and managerial roles in my department?
+What are the most important clauses to review in a software vendor contract before signing, and what should I negotiate?
+Explain the main GDPR obligations a company has when processing employee personal data for HR purposes.
+What must be included in a data processing agreement (DPA) with a cloud infrastructure provider to ensure GDPR compliance?
+How do I summarize a 40-page supplier contract into a clear one-page executive briefing for the board?
+What are typical warranty, limitation of liability, and indemnification clauses in a SaaS subscription agreement?
+Explain the key differences between a non-disclosure agreement (NDA) and a non-compete agreement and when each applies.
+What compliance requirements should I consider before deploying an AI-based recruitment screening tool?
+How do I conduct a data protection impact assessment (DPIA) for a new employee monitoring software system?
+What SLA provisions should I prioritize negotiating with a cloud hosting vendor to protect business continuity?
+Explain what constitutes a material breach of contract and what legal remedies are typically available.
+What business records must a company retain, and for how long, under standard employment and financial regulations?
+How do I write a compliant cookie consent banner and privacy notice for a company website under GDPR?
+What techniques help me stay focused and maintain energy during a day with eight consecutive video conference calls?
+How do I write an honest and impactful self-performance review that highlights contributions without sounding boastful?
+What is the best structure for a meeting agenda that reliably produces clear decisions and action items?
+How can I improve my executive communication style to make written briefings more concise and persuasive?
+What are effective methods for delegating work to team members without slipping into micromanagement?
+How do I prepare a compelling 5-minute presentation for a company all-hands that covers a complex technical topic?
+Write a template for a project kickoff email that sets clear expectations on scope, roles, and communication norms.
+What evidence-based strategies can reduce unnecessary meetings and protect deep work time for an engineering team?
+How do I professionally raise the topic of a flexible working arrangement with my manager?
+What techniques help me manage competing priorities across multiple concurrent projects without dropping important items?
