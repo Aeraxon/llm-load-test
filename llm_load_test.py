@@ -178,7 +178,8 @@ def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type,
             continue
 
 def llm_chat_multiturn(model, prompts, system_prompts, user_id, profile,
-                       turns_min, turns_max, api_type, base_url, api_key, test_duration):
+                       turns_min, turns_max, api_type, base_url, api_key, test_duration,
+                       think_min=3.0, think_max=30.0):
     """Simulates a multi-turn chat user for a fixed test duration (--mode multi-turn)"""
     global response_times, ttft_times, tpot_times, error_count, success_count
 
@@ -213,6 +214,10 @@ def llm_chat_multiturn(model, prompts, system_prompts, user_id, profile,
                 success_count.value += 1
                 messages.append({"role": "assistant", "content": "[response]"})
                 print(f"[User {user_id}|turn {turn+1}] ✓ {elapsed:.2f}s (TTFT: {ttft:.2f}s, TPOT: {tpot:.3f}s) - {prompt[:30]}...")
+                # Think time: user reads the response and composes the next message
+                if turn < turns - 1 and time.time() < end_time:
+                    think = random.uniform(think_min, think_max)
+                    time.sleep(min(think, end_time - time.time()))
             else:
                 error_count.value += 1
                 print(f"[User {user_id}|turn {turn+1}] ✗ {error} - restarting session")
@@ -247,7 +252,8 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                   api_type, base_url, api_key, gpu_name, llm_provider,
                   mode='multi-turn', system_prompts_list=None,
                   turns_min=3, turns_max=7, profiles=None,
-                  workload_mix_tuple=None, lc_prompts=None, lc_turns_max=2):
+                  workload_mix_tuple=None, lc_prompts=None, lc_turns_max=2,
+                  think_min=3.0, think_max=30.0):
     """Runs a load test with a given number of simulated users"""
     reset_counters()
 
@@ -296,7 +302,8 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                 p = multiprocessing.Process(
                     target=llm_chat_multiturn,
                     args=(model, prompts, system_prompts_list, user_id, profile,
-                          turns_min, turns_max, api_type, base_url, api_key, test_duration)
+                          turns_min, turns_max, api_type, base_url, api_key, test_duration,
+                          think_min, think_max)
                 )
             else:
                 # Long-context slice: use lc_prompts pool, capped turn count
@@ -305,7 +312,7 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                     target=llm_chat_multiturn,
                     args=(model, lc_prompts or prompts, system_prompts_list, user_id,
                           lc_profile, 1, lc_turns_max, api_type, base_url, api_key,
-                          test_duration)
+                          test_duration, think_min, think_max)
                 )
             p.start()
             processes.append(p)
@@ -566,6 +573,10 @@ def main():
                         help="Path to long-context prompts file (env: LONG_CONTEXT_PROMPTS_FILE)")
     parser.add_argument("--lc-turns-max", type=int, default=None,
                         help="Max turns for long-context slice (default: 2, env: LC_TURNS_MAX)")
+    parser.add_argument("--think-min", type=float, default=None,
+                        help="Minimum think time between turns in seconds (default: 3.0, env: THINK_MIN)")
+    parser.add_argument("--think-max", type=float, default=None,
+                        help="Maximum think time between turns in seconds (default: 30.0, env: THINK_MAX)")
 
     args = parser.parse_args()
 
@@ -585,6 +596,8 @@ def main():
     lc_turns_max  = resolve_arg(args.lc_turns_max,  'LC_TURNS_MAX',   default=2,    cast=int)
     pause_min     = resolve_arg(args.pause_min,     'PAUSE_MIN',      default=3.0,  cast=float)
     pause_max     = resolve_arg(args.pause_max,     'PAUSE_MAX',      default=30.0, cast=float)
+    think_min     = resolve_arg(args.think_min,     'THINK_MIN',      default=3.0,  cast=float)
+    think_max     = resolve_arg(args.think_max,     'THINK_MAX',      default=30.0, cast=float)
     step_size     = resolve_arg(args.step_size,     'STEP_SIZE',      default=5,    cast=int)
     test_duration = resolve_arg(args.test_duration, 'TEST_DURATION',  default=300,  cast=int)
     output        = resolve_arg(args.output,        'OUTPUT')
@@ -715,6 +728,7 @@ def main():
     if workload_mix_tuple or mode == 'multi-turn':
         print(f"Profile mix (Power:Normal:Occasional): {profile_mix}")
         print(f"Turns per session: {turns_min}–{turns_max}")
+        print(f"Think time between turns: {think_min}–{think_max} seconds")
 
     results = []
     user_steps = list(range(step_size, users + 1, step_size))
@@ -762,6 +776,8 @@ def main():
                     workload_mix_tuple=workload_mix_tuple,
                     lc_prompts=lc_prompts,
                     lc_turns_max=lc_turns_max,
+                    think_min=think_min,
+                    think_max=think_max,
                 )
 
                 if result:

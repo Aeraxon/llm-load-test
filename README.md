@@ -398,6 +398,8 @@ python llm_load_test.py \
 | `--workload-mix` | `WORKLOAD_MIX` | None | `single:multi:lc` percentages summing to 100; overrides `--mode` |
 | `--long-context-prompts` | `LONG_CONTEXT_PROMPTS_FILE` | None | Prompts file for the long-context slice |
 | `--lc-turns-max` | `LC_TURNS_MAX` | `2` | Max turns for the long-context slice |
+| `--think-min` | `THINK_MIN` | `3.0` | Minimum think time between turns within a session (seconds) |
+| `--think-max` | `THINK_MAX` | `30.0` | Maximum think time between turns within a session (seconds) |
 | `--system-prompts` | `SYSTEM_PROMPTS_FILE` | None | System prompts file; one persona per line |
 | `--turns-min` | `TURNS_MIN` | `3` | Minimum turns per multi-turn session |
 | `--turns-max` | `TURNS_MAX` | `7` | Maximum turns per multi-turn session |
