@@ -140,16 +140,17 @@ def assign_profiles(user_count, profile_mix_str, turns_min, turns_max):
     occasional_count = int(user_count * occasional_pct / 100)
     normal_count = user_count - power_count - occasional_count  # remainder to Normal
 
-    # mid is the 50% point between min and max — splits the turn range in half
-    mid = turns_min + (turns_max - turns_min) // 2
+    span = turns_max - turns_min
+    occasional_max = turns_min + round(span * 0.30)
+    power_min      = turns_min + round(span * 0.60)
 
     profiles = []
     for _ in range(power_count):
-        profiles.append({"name": "power",      "turns": (mid, turns_max)})
+        profiles.append({"name": "power",      "turns": (power_min, turns_max)})
     for _ in range(normal_count):
         profiles.append({"name": "normal",     "turns": (turns_min, turns_max)})
     for _ in range(occasional_count):
-        profiles.append({"name": "occasional", "turns": (turns_min, mid)})
+        profiles.append({"name": "occasional", "turns": (turns_min, occasional_max)})
 
     return profiles
 

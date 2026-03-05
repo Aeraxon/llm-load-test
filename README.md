@@ -127,13 +127,13 @@ What the profiles control is the **session depth** — how much context a user b
 
 **Occasional user** — shallow sessions, minimum turns. One or two short questions, then the conversation is done. Lightest per-user load.
 
-| Profile | Turns per Session |
-|---------|-------------------|
-| Power | random in upper half: `mid` – `--turns-max` |
-| Normal | random across full range: `--turns-min` – `--turns-max` |
-| Occasional | random in lower half: `--turns-min` – `mid` |
+| Profile | Turn range | Percentile of span |
+|---------|------------|--------------------|
+| Power | `turns_min + 60%` – `turns_max` | upper 40% |
+| Normal | `turns_min` – `turns_max` | full range |
+| Occasional | `turns_min` – `turns_min + 30%` | lower 30% |
 
-`mid = turns_min + (turns_max - turns_min) / 2`. Example with `--turns-min 3 --turns-max 7`: Occasional draws 3–5 turns, Normal 3–7, Power 5–7.
+Example with `--turns-min 3 --turns-max 7` (span = 4): Occasional draws 3–4 turns, Normal 3–7, Power 5–7.
 
 The default mix of `40:40:20` (Power:Normal:Occasional) is a conservative assumption that skews toward heavy users. Adjust with `--profile-mix` to reflect your actual audience — e.g. `10:60:30` if most users are light adopters.
 
