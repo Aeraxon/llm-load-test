@@ -152,20 +152,98 @@ pip install -r requirements.txt
 
 All parameters can be set in `.env`, on the command line, or both. **CLI arguments override `.env` values, which override built-in defaults.**
 
+### Finding the Right Model Name
+
+The value for `MODEL` must exactly match what the backend reports — not a human-readable name, but the internal identifier. Here's how to look it up for each backend before filling in `.env`.
+
+#### Ollama
+
+```bash
+curl http://127.0.0.1:11434/api/tags
+```
+
+Example response (shortened):
+
+```json
+{
+  "models": [
+    { "name": "llama3.2:latest",  "size": 2019393189 },
+    { "name": "mistral:7b-q4",    "size": 4109854720 },
+    { "name": "codellama:latest",  "size": 3825819519 }
+  ]
+}
+```
+
+Use the `name` field exactly as shown — including the tag (`:latest`, `:7b-q4`, etc.):
+
+```env
+API_TYPE=ollama
+API_BASE_URL=http://127.0.0.1:11434
+MODEL=llama3.2:latest
+LLM_PROVIDER=Ollama
+```
+
+If you omit the tag, Ollama defaults to `:latest` and that usually works too (`MODEL=llama3.2`).
+
+#### vLLM
+
+```bash
+curl http://127.0.0.1:8000/v1/models
+```
+
+Example response (shortened):
+
+```json
+{
+  "data": [
+    {
+      "id": "meta-llama/Llama-3.1-8B-Instruct",
+      "object": "model"
+    }
+  ]
+}
+```
+
+Use the `id` field exactly as shown — this is the HuggingFace model path that vLLM was started with:
+
+```env
+API_TYPE=vllm
+API_BASE_URL=http://127.0.0.1:8000
+MODEL=meta-llama/Llama-3.1-8B-Instruct
+LLM_PROVIDER=vLLM
+```
+
+vLLM usually serves exactly one model, so there is only one entry in `data`. Copy the `id` value directly.
+
+#### LM Studio
+
+```bash
+curl http://127.0.0.1:1234/v1/models
+```
+
+Same OpenAI-compatible format as vLLM. Copy the `id` from the response — it typically looks like `lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF` or similar.
+
+#### llama.cpp server
+
+llama.cpp does not have a `/v1/models` endpoint. The model name is whatever you pass via `--model` — it can be anything you like and is used only as a label in the results file. Use the filename without path, e.g. `llama-3.1-8b-instruct.Q4_K_M.gguf`.
+
+---
+
 ### .env File (Recommended)
 
 ```bash
 cp .env.example .env
 ```
 
+**Ollama example:**
+
 ```env
 # === API Connection ===
 API_TYPE=ollama
 API_BASE_URL=http://127.0.0.1:11434
-# API_KEY=
 
 # === Model ===
-MODEL=llama2
+MODEL=llama3.2:latest
 LLM_PROVIDER=Ollama
 GPU=RTX A2000
 
@@ -187,6 +265,40 @@ LC_TURNS_MAX=2
 # === Test Parameters ===
 USERS=50
 STEP_SIZE=5
+TEST_DURATION=300
+PAUSE_MIN=3
+PAUSE_MAX=30
+```
+
+**vLLM example:**
+
+```env
+# === API Connection ===
+API_TYPE=vllm
+API_BASE_URL=http://127.0.0.1:8000
+
+# === Model (exact id from GET /v1/models) ===
+MODEL=meta-llama/Llama-3.1-8B-Instruct
+LLM_PROVIDER=vLLM
+GPU=A100
+
+# === Prompt Files ===
+PROMPTS_FILE=prompts_english.txt
+SYSTEM_PROMPTS_FILE=system_prompts.txt
+LONG_CONTEXT_PROMPTS_FILE=prompts_long_context.txt
+
+# === Workload Mix ===
+WORKLOAD_MIX=20:60:20
+
+# === Multi-Turn Settings ===
+PROFILE_MIX=40:40:20
+TURNS_MIN=3
+TURNS_MAX=7
+LC_TURNS_MAX=2
+
+# === Test Parameters ===
+USERS=100
+STEP_SIZE=10
 TEST_DURATION=300
 PAUSE_MIN=3
 PAUSE_MAX=30
