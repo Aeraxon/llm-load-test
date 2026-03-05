@@ -538,16 +538,16 @@ def main():
                         help="Model(s), comma-separated for multiple models (env: MODEL)")
     parser.add_argument("--llm-provider", type=str, required=False, default=None,
                         help="LLM provider name, e.g. 'Ollama', 'vLLM' (env: LLM_PROVIDER)")
-    parser.add_argument("--gpu", type=str, default="Unknown",
-                        help="GPU label for documentation (default: Unknown)")
-    parser.add_argument("--pause-min", type=float, default=3.0,
-                        help="Minimum pause between messages in seconds (default: 3.0)")
-    parser.add_argument("--pause-max", type=float, default=30.0,
-                        help="Maximum pause between messages in seconds (default: 30.0)")
-    parser.add_argument("--step-size", type=int, default=5,
-                        help="User count increment per step (default: 5)")
-    parser.add_argument("--test-duration", type=int, default=300,
-                        help="Test duration per step in seconds (default: 300 = 5 minutes)")
+    parser.add_argument("--gpu", type=str, default=None,
+                        help="GPU label for documentation (default: Unknown, env: GPU)")
+    parser.add_argument("--pause-min", type=float, default=None,
+                        help="Minimum pause between messages in seconds (default: 3.0, env: PAUSE_MIN)")
+    parser.add_argument("--pause-max", type=float, default=None,
+                        help="Maximum pause between messages in seconds (default: 30.0, env: PAUSE_MAX)")
+    parser.add_argument("--step-size", type=int, default=None,
+                        help="User count increment per step (default: 5, env: STEP_SIZE)")
+    parser.add_argument("--test-duration", type=int, default=None,
+                        help="Test duration per step in seconds (default: 300, env: TEST_DURATION)")
     parser.add_argument("--host", type=str, default=None,
                         help="API host and port (default: from .env or 127.0.0.1:11434)")
     parser.add_argument("--api-type", type=str, default=None,
@@ -556,14 +556,14 @@ def main():
                         help="API key for authentication (optional, from .env if not provided)")
     parser.add_argument("--output", type=str, default=None,
                         help="Custom CSV output filename (optional)")
-    parser.add_argument("--mode", type=str, choices=["multi-turn", "single-turn"], default="multi-turn",
-                        help="Test mode: multi-turn (default) or single-turn")
+    parser.add_argument("--mode", type=str, choices=["multi-turn", "single-turn"], default=None,
+                        help="Test mode: multi-turn (default) or single-turn (env: MODE)")
     parser.add_argument("--system-prompts", type=str, default=None,
                         help="Path to system prompts file (one per line)")
-    parser.add_argument("--turns-min", type=int, default=3,
-                        help="Minimum turns per multi-turn session (default: 3)")
-    parser.add_argument("--turns-max", type=int, default=7,
-                        help="Maximum turns per multi-turn session (default: 7)")
+    parser.add_argument("--turns-min", type=int, default=None,
+                        help="Minimum turns per multi-turn session (default: 3, env: TURNS_MIN)")
+    parser.add_argument("--turns-max", type=int, default=None,
+                        help="Maximum turns per multi-turn session (default: 7, env: TURNS_MAX)")
     parser.add_argument("--profile-mix", type=str, default=None,
                         help="Power:Normal:Occasional user mix, must sum to 100 (default: 40:40:20, env: PROFILE_MIX)")
     parser.add_argument("--workload-mix", type=str, default=None,
