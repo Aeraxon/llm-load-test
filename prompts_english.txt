@@ -97,4 +97,12 @@ Summarize the new working hours recording requirements effective 2025.
 Create a roadmap template for a software development project with key milestones.  
 How can I make my PowerPoint presentations more interactive and engaging?  
 Help me write a short video script explaining our company values.  
-List ideas on how to improve sustainability practices in our office daily routine.  
+List ideas on how to improve sustainability practices in our office daily routine.
+Write a detailed onboarding plan for a new software engineer joining a mid-sized tech company, covering the first 30, 60, and 90 days with specific milestones, meetings to schedule, tools to set up, and goals to achieve.
+Create a comprehensive project status report template with clearly labeled sections for executive summary, timeline and milestones, budget overview, risk register, team updates, and upcoming decisions required.
+Explain the concept of transformer neural networks in depth, covering the original attention mechanism, the encoder-decoder architecture, positional encoding, multi-head attention, and how these components work together, with practical examples.
+Write a thorough change management communication plan for a company migrating from a legacy CRM to a new cloud-based platform, including stakeholder analysis, key messages, communication channels, timeline, and a FAQ section for employees.
+Develop a complete performance review framework for a software development team, including evaluation criteria, rating scales with behavioral anchors, sample review questions, calibration guidance, and advice for handling difficult conversations.
+Draft a detailed competitive analysis report structure for a SaaS product entering the project management software market, with sections for market overview, competitor profiles, feature comparison matrix, pricing analysis, and strategic positioning recommendations.
+Write an in-depth guide on SQL query optimization techniques for database administrators, covering index design, query execution plans, common performance anti-patterns, partitioning strategies, and practical examples for each technique.
+Create a thorough employee handbook section on data privacy and information security responsibilities, covering data classification, acceptable use of company systems, remote work security requirements, incident reporting procedures, and consequences for policy violations.

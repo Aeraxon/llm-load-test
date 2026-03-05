@@ -1,6 +1,6 @@
 # LLM Load Test Tool
 
-A realistic load testing tool for LLM APIs that simulates real user behavior and helps determine the capacity limits of your LLM chat environment.
+A realistic load testing tool for LLM APIs that simulates real multi-turn user behavior and helps determine the capacity limits of your LLM chat environment.
 
 **Supports multiple backends**: Ollama, vLLM, LM Studio, llama.cpp, OpenAI, and any OpenAI-compatible API.
 
@@ -16,7 +16,7 @@ A realistic load testing tool for LLM APIs that simulates real user behavior and
 - [Parameters](#parameters)
 - [Examples](#examples)
 - [Output Files](#output-files)
-- [Prompts File](#prompts-file)
+- [Prompt Files](#prompt-files)
 - [Test Duration and Timing Behavior](#test-duration-and-timing-behavior)
 - [Interpreting Results](#interpreting-results)
 - [Best Practices](#best-practices)
@@ -40,78 +40,94 @@ Write a hello world function in JavaScript
 
 ### 3. Run Your First Test
 ```bash
-# For Ollama (default)
+# Multi-turn mode (default) with Ollama
 python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --llm-provider "Ollama"
 
-# For vLLM
-python llm_load_test.py --api-type vllm --host 127.0.0.1:8000 --prompts prompts.txt --users 20 --model "meta-llama/Llama-2-7b-chat-hf" --llm-provider "vLLM"
+# With system prompts for more realistic persona simulation
+python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --llm-provider "Ollama" \
+  --system-prompts system_prompts.txt
 
-# For LM Studio
-python llm_load_test.py --api-type lmstudio --host 127.0.0.1:1234 --prompts prompts.txt --users 20 --model "local-model" --llm-provider "LM Studio"
+# For vLLM
+python llm_load_test.py --api-type vllm --host 127.0.0.1:8000 --prompts prompts.txt --users 20 \
+  --model "meta-llama/Llama-2-7b-chat-hf" --llm-provider "vLLM"
+
+# Single-turn mode (original behavior)
+python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --llm-provider "Ollama" \
+  --mode single-turn
 ```
 
-That's it! The tool will automatically test with 5, 10, 15, and 20 users, and save results to `results/<timestamp>/` including a CSV file and a Markdown summary.
+That's it! The tool automatically tests with 5, 10, 15, and 20 users, and saves results to `results/<timestamp>/` including a CSV file and a Markdown summary.
 
 ## Supported Backends
 
-This tool works with any LLM API that follows standard protocols:
-
-- **Ollama** - Local LLM inference server
-- **vLLM** - High-performance inference server (OpenAI-compatible)
-- **LM Studio** - Desktop LLM application (OpenAI-compatible)
-- **llama.cpp** - C++ inference server (OpenAI-compatible)
-- **OpenAI** - Official OpenAI API
-- **Text Generation WebUI** - Gradio-based UI (OpenAI-compatible mode)
-- **Any OpenAI-compatible API** - Generic support for compatible endpoints
+| Backend | `--api-type` | Default Port |
+|---------|-------------|--------------|
+| Ollama | `ollama` | 11434 |
+| vLLM | `vllm` | 8000 |
+| LM Studio | `lmstudio` | 1234 |
+| llama.cpp | `llamacpp` | 8080 |
+| OpenAI | `openai` | — |
+| Any OpenAI-compatible API | `openai` | — |
 
 ## Overview
 
-This tool performs automated load tests by gradually increasing the number of simulated users (e.g., 5, 10, 15, 20 users). Each test runs for a defined duration (default 5 minutes) and collects detailed metrics. At the end, an evaluation table is automatically created to help identify optimal capacity.
+This tool performs automated load tests by gradually increasing the number of simulated users (e.g., 5, 10, 15, 20 users). Each step runs for a defined duration (default 5 minutes) and collects detailed metrics. At the end, an evaluation table helps identify optimal capacity.
 
 **Key Features:**
+- **Multi-Turn Sessions**: Simulates real chat conversations with growing message history (default mode)
+- **User Profiles**: Power / Normal / Occasional users with different pacing and session depth
+- **TPOT Measurement**: Tracks inter-token latency (Time Per Output Token) alongside TTFT
+- **System Prompts**: Load enterprise assistant personas from a file to simulate varied user contexts
 - **Multi-Backend Support**: Works with Ollama, vLLM, LM Studio, llama.cpp, OpenAI, and more
-- **Gradual User Increase**: Automatic tests from 5 to the desired maximum number
+- **Gradual User Increase**: Automatic tests from step-size up to the desired maximum
 - **Multi-Model Support**: Compare multiple models in one run
-- **Realistic Pause Times**: Configurable thinking pauses between prompts (3-30 seconds)
 - **Automatic Evaluation**: Results table with all important metrics
-- **GPU Documentation**: Storage of used hardware for later reference
 - **System Monitoring**: CPU and memory monitoring during tests
-- **CSV Export**: Results exportable for further analysis
-- **Flexible Configuration**: Configure via .env file or command-line arguments
+- **CSV + Markdown Export**: Structured results for further analysis
 
 ## Features
 
-### Automated Test Execution
-- **Gradual Increase**: User count is automatically increased in configurable steps
-- **Test Duration Behavior**: New requests are sent for the specified duration, then waits for completion of all running requests
-- **Continuous Tests**: Users send requests throughout the entire active test duration
-- **Automatic Termination**: Tests are terminated early if error rate exceeds 30%
-- **Automatic Evaluation**: Results table is automatically created at the end
+### Multi-Turn Session Simulation (Default)
 
-### Realistic Simulation
-- **Variable Pause Times**: Realistic thinking pauses between prompts (default: 3-30 seconds)
-- **Random Prompt Selection**: Prompts are used in random order
-- **Customer-Specific Prompts**: Use real prompts from your work environment
+By default the tool runs in `--mode multi-turn`. Each simulated user:
+1. Starts a new conversation session and optionally receives a random system prompt
+2. Sends multiple turns within that session (3–7 by default), accumulating message history
+3. Pauses between sessions according to their user profile
+4. Repeats until the test duration is up
+
+This models real chat application behavior where growing context windows increase per-request compute cost. Results in multi-turn mode reflect ~60–70% of single-turn benchmark capacity by design.
+
+Use `--mode single-turn` to reproduce the original single-request behavior for pure throughput measurement.
+
+### User Profiles
+
+Three behavioral profiles are mixed into the simulated user pool via `--profile-mix` (Power:Normal:Occasional, default `40:40:20`):
+
+| Profile | Pause Between Sessions | Turns per Session |
+|---------|----------------------|-------------------|
+| Power | 2–5 s | `--turns-max` (fixed) |
+| Normal | 15–45 s | random between `--turns-min` and `--turns-max` |
+| Occasional | 60–120 s | `--turns-min` (fixed) |
 
 ### Comprehensive Metrics
-- **Response Times**: Average, maximum, minimum of complete response time
-- **Time-to-First-Token (TTFT)**: Average time until first token (UX-critical)
+
+- **Response Time**: Average, maximum, minimum of complete response time per request
+- **TTFT (Time-to-First-Token)**: Time until first token — the primary UX metric
+- **TPOT (Time Per Output Token)**: `(total_time - ttft) / (token_count - 1)` — measures generation throughput
 - **Error Rate**: Percentage of failed requests
 - **System Monitoring**: CPU and memory usage during tests
 - **Request Statistics**: Successful vs. failed requests
-- **Hardware Documentation**: GPU information for later reference
-- **Automatic Assessment**: Intelligent recommendations based on TTFT and stability
 
-### Multi-Model Testing
-- **Model Comparison**: Test multiple models sequentially
-- **Consistent Conditions**: All models under identical test conditions
-- **Clear Results**: Direct comparison of model performance
-- **Backend Flexibility**: Switch between different LLM backends easily
+### Automated Test Execution
+
+- **Gradual Increase**: User count is automatically increased in configurable steps
+- **Automatic Termination**: Tests abort early if error rate exceeds 30%
+- **Skip-on-Overload**: When a model hits the 30% threshold, higher user counts are skipped automatically
 
 ## Installation
 
 ### Prerequisites
-- Python 3.7 or higher
+- Python 3.8 or higher
 - A running LLM API server (Ollama, vLLM, LM Studio, etc.)
 
 ### Installing Dependencies
@@ -124,25 +140,22 @@ Or install manually:
 pip install requests psutil python-dotenv
 ```
 
-### Download Script
-Clone or download this repository:
+### Download
 ```bash
 git clone <repository-url>
-cd ollama_load_test
+cd llm-load-test
 ```
 
 ## Configuration
 
-You can configure the tool either via a `.env` file or command-line arguments.
+Configure via a `.env` file or command-line arguments. CLI arguments override `.env`.
 
 ### Option 1: Using .env File (Recommended)
 
-Create a `.env` file from the example:
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your configuration:
 ```env
 # For Ollama (default)
 API_TYPE=ollama
@@ -168,25 +181,27 @@ API_BASE_URL=http://127.0.0.1:11434
 
 ### Option 2: Command-Line Arguments
 
-Override `.env` settings with command-line arguments:
 ```bash
-python llm_load_test.py --api-type vllm --host 127.0.0.1:8000 --prompts prompts.txt --users 25 --model llama2
+python llm_load_test.py --api-type vllm --host 127.0.0.1:8000 --prompts prompts.txt --users 25 --model llama2 --llm-provider "vLLM"
 ```
 
 ## Usage
 
 ### Basic Syntax
 ```bash
-python llm_load_test.py --prompts PROMPTS_FILE --users MAX_USERS --model MODEL(S) [OPTIONS]
+python llm_load_test.py --prompts PROMPTS_FILE --users MAX_USERS --model MODEL(S) --llm-provider NAME [OPTIONS]
 ```
 
 ### Minimal Example
 ```bash
-# Tests gradually 5, 10, 15, 20, 25 users (5 minutes per step each)
-python llm_load_test.py --prompts my_prompts.txt --users 25 --model llama2
+# Multi-turn (default): tests 5, 10, 15, 20, 25 users
+python llm_load_test.py --prompts prompts_english.txt --users 25 --model llama2 --llm-provider "Ollama"
 
-# Compares multiple models
-python llm_load_test.py --prompts my_prompts.txt --users 25 --model "llama2,mistral,codellama"
+# Single-turn: original throughput benchmark behavior
+python llm_load_test.py --prompts prompts_english.txt --users 25 --model llama2 --llm-provider "Ollama" --mode single-turn
+
+# Multi-model comparison
+python llm_load_test.py --prompts prompts_english.txt --users 25 --model "llama2,mistral" --llm-provider "Ollama"
 ```
 
 ## Parameters
@@ -195,104 +210,118 @@ python llm_load_test.py --prompts my_prompts.txt --users 25 --model "llama2,mist
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `--prompts` | Path to prompts file | `--prompts customer_prompts.txt` |
+| `--prompts` | Path to prompts file | `--prompts prompts_english.txt` |
 | `--users` | Maximum number of users (reached gradually) | `--users 50` |
-| `--model` | Model(s), comma-separated for multiple models | `--model "llama2,mistral"` |
-| `--llm-provider` | LLM Provider name for documentation | `--llm-provider "Ollama"` |
+| `--model` | Model(s), comma-separated for multiple | `--model "llama2,mistral"` |
+| `--llm-provider` | Provider name for documentation | `--llm-provider "Ollama"` |
 
 ### Optional Parameters
 
-| Parameter | Default | Description | Example |
-|-----------|---------|-------------|---------|
-| `--api-type` | ollama (or from .env) | API type: ollama, vllm, lmstudio, llamacpp, openai | `--api-type vllm` |
-| `--host` | from .env or 127.0.0.1:11434 | API host and port | `--host 192.168.x.x:8000` |
-| `--api-key` | from .env | API key for authentication (if needed) | `--api-key sk-...` |
-| `--gpu` | Unknown | GPU designation for documentation | `--gpu "RTX A2000"` |
-| `--pause-min` | 3.0 | Minimum pause between messages (seconds) | `--pause-min 1.0` |
-| `--pause-max` | 30.0 | Maximum pause between messages (seconds) | `--pause-max 60.0` |
-| `--step-size` | 5 | Step size for user increase | `--step-size 10` |
-| `--test-duration` | 300 | Duration of active request phase per step (seconds) | `--test-duration 600` |
-| `--output` | results/TIMESTAMP/ | Optional: Custom CSV filename (disables folder creation and summary.md) | `--output results.csv` |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--mode` | `multi-turn` | `multi-turn` (realistic chat) or `single-turn` (throughput benchmark) |
+| `--system-prompts` | None | Path to system prompts file (one per line); randomly assigned per session |
+| `--turns-min` | `3` | Minimum turns per multi-turn session |
+| `--turns-max` | `7` | Maximum turns per multi-turn session |
+| `--profile-mix` | `40:40:20` | Power:Normal:Occasional user split, must sum to 100 |
+| `--api-type` | `ollama` | API type: `ollama`, `vllm`, `lmstudio`, `llamacpp`, `openai` |
+| `--host` | from .env or `127.0.0.1:11434` | API host and port |
+| `--api-key` | from .env | API key for authentication |
+| `--gpu` | `Unknown` | GPU label for documentation |
+| `--pause-min` | `3.0` | Minimum inter-session pause in seconds (single-turn: inter-request) |
+| `--pause-max` | `30.0` | Maximum inter-session pause in seconds |
+| `--step-size` | `5` | User count increment per step |
+| `--test-duration` | `300` | Duration per step in seconds (default: 5 minutes) |
+| `--output` | auto | Custom CSV filename; disables folder + summary.md creation |
 
 ## Examples
 
-### Testing Different Backends
+### Realistic Multi-Turn Load Test (Default)
 
-#### Ollama (Default)
 ```bash
+# With enterprise system prompts for varied user personas
 python llm_load_test.py \
-  --prompts prompts.txt \
+  --prompts prompts_english.txt \
+  --system-prompts system_prompts.txt \
   --users 30 \
   --model llama2 \
   --llm-provider "Ollama" \
   --gpu "RTX A2000"
 ```
 
-#### vLLM Server
+### Long-Context Stress Test
+
+```bash
+# Use long-context prompts to simulate document Q&A workloads
+python llm_load_test.py \
+  --prompts prompts_long_context.txt \
+  --system-prompts system_prompts.txt \
+  --users 20 \
+  --model llama2 \
+  --llm-provider "Ollama" \
+  --turns-min 2 \
+  --turns-max 4
+```
+
+### Custom Profile Mix
+
+```bash
+# Heavy power-user skew (60% power, 30% normal, 10% occasional)
+python llm_load_test.py \
+  --prompts prompts_english.txt \
+  --users 25 \
+  --model llama2 \
+  --llm-provider "Ollama" \
+  --profile-mix 60:30:10 \
+  --turns-min 5 \
+  --turns-max 10
+```
+
+### Single-Turn Throughput Benchmark
+
+```bash
+# Original behavior — pure throughput, no conversation history
+python llm_load_test.py \
+  --prompts prompts_english.txt \
+  --users 40 \
+  --model llama2 \
+  --llm-provider "Ollama" \
+  --mode single-turn \
+  --pause-min 1 \
+  --pause-max 5
+```
+
+### vLLM Backend
+
 ```bash
 python llm_load_test.py \
   --api-type vllm \
   --host 127.0.0.1:8000 \
-  --prompts prompts.txt \
+  --prompts prompts_english.txt \
+  --system-prompts system_prompts.txt \
   --users 30 \
   --model "meta-llama/Llama-2-7b-chat-hf" \
   --llm-provider "vLLM" \
   --gpu "A100"
 ```
 
-#### LM Studio
-```bash
-python llm_load_test.py \
-  --api-type lmstudio \
-  --host 127.0.0.1:1234 \
-  --prompts prompts.txt \
-  --users 20 \
-  --model "local-model" \
-  --llm-provider "LM Studio" \
-  --gpu "RTX 4090"
-```
-
-#### llama.cpp Server
-```bash
-python llm_load_test.py \
-  --api-type llamacpp \
-  --host 127.0.0.1:8080 \
-  --prompts prompts.txt \
-  --users 15 \
-  --model "llama-2-7b-chat" \
-  --llm-provider "llama.cpp"
-```
-
 ### Multi-Model Comparison
+
 ```bash
-# Compares 3 models gradually up to 30 users
 python llm_load_test.py \
-  --prompts customer_prompts.txt \
+  --prompts prompts_english.txt \
+  --system-prompts system_prompts.txt \
   --users 30 \
   --model "llama2,mistral,codellama" \
   --llm-provider "Ollama" \
   --gpu "RTX A2000"
 ```
 
-### Quick Test with Short Pause Times
-```bash
-# Simulates power users with 1-5 seconds pause time
-python llm_load_test.py \
-  --prompts prompts.txt \
-  --users 40 \
-  --model "llama2,mistral" \
-  --llm-provider "Ollama" \
-  --pause-min 1 \
-  --pause-max 5 \
-  --step-size 10 \
-  --gpu "RTX 4090"
-```
-
 ### Remote Server with Longer Tests
+
 ```bash
-# 10-minute tests on remote server
 python llm_load_test.py \
-  --prompts support_prompts.txt \
+  --prompts prompts_english.txt \
   --users 25 \
   --model codellama \
   --llm-provider "Ollama" \
@@ -302,26 +331,9 @@ python llm_load_test.py \
   --output remote_test_results.csv
 ```
 
-### Different User Types
-
-**Power Users (fast interaction):**
-```bash
-python llm_load_test.py --prompts prompts.txt --users 20 --model "llama2,mistral" --llm-provider "Ollama" --pause-min 1 --pause-max 5 --gpu "RTX 4090"
-```
-
-**Normal Office Users (standard):**
-```bash
-python llm_load_test.py --prompts prompts.txt --users 30 --model llama2 --llm-provider "Ollama" --gpu "RTX A2000"
-```
-
-**Thoughtful Users (long pauses):**
-```bash
-python llm_load_test.py --prompts prompts.txt --users 15 --model llama2 --llm-provider "Ollama" --pause-min 10 --pause-max 60 --gpu "RTX A2000"
-```
-
 ## Output Files
 
-The tool automatically creates a timestamped folder for each test run with comprehensive results.
+The tool automatically creates a timestamped folder for each test run.
 
 ### Directory Structure
 
@@ -337,325 +349,242 @@ results/
 
 ### results.csv
 
-Contains detailed metrics for all test steps:
-- Users, Model, LLM_Provider, GPU
-- Avg_Antwortzeit, Avg_TTFT, Max_Antwortzeit, Min_Antwortzeit
-- Fehlerrate, CPU_Prozent, Memory_Prozent
-- Total_Requests, Erfolgreiche_Requests, Fehlgeschlagene_Requests
-- Testdauer, Empfehlung
+Columns (in order):
 
-Perfect for importing into Excel, Google Sheets, or data analysis tools.
+```
+Users, Model, LLM_Provider, GPU,
+Avg_Response_Time, Avg_TTFT, Avg_TPOT,
+Max_Response_Time, Min_Response_Time,
+Error_Rate, CPU_Percent, Memory_Percent,
+Total_Requests, Successful_Requests, Failed_Requests,
+Test_Duration, Recommendation
+```
 
 ### summary.md
 
 A human-readable Markdown report containing:
 
-**Test Configuration:**
-- Timestamp, LLM Provider, API type, base URL
-- Models tested, GPU used
-- Test duration and pause times
-- User step configuration
-
-**Results per Model:**
-- Formatted tables with all metrics
-- Performance summary for each model
-- Best performance level identified
-
-**Overall Summary:**
-- Total requests (successful/failed)
-- Average TTFT across all tests
-- Overall error rate
-
-**Recommendations:**
-- Recommended maximum concurrent users
-- Performance assessment at that load
-- Warnings if system is overloaded
+- **Test Configuration**: timestamp, provider, API type, base URL, mode, profile mix, turns range
+- **Results per Model**: table with Avg. Time, TTFT, TPOT, Max. Time, Error Rate, CPU, Memory, Requests, Recommendation
+- **Overall Summary**: total requests, average TTFT, overall error rate
+- **Recommendations**: suggested maximum concurrent users; in multi-turn mode, a note on the ~0.6–0.7× correction factor vs. single-turn benchmarks
 
 ### Manual CSV Export
 
-If you want to save results to a specific location without the folder structure:
-
 ```bash
-python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --output my_results.csv
+# Save only CSV, no folder or summary.md
+python llm_load_test.py --prompts prompts_english.txt --users 20 --model llama2 --llm-provider "Ollama" --output my_results.csv
 ```
 
-This will save only the CSV file without creating a results folder or summary.md.
+## Prompt Files
 
-## Prompts File
+### Main Prompts File (`--prompts`)
 
-### Format
-The prompts file is a simple text file with one prompt per line:
+One prompt per line, no blank lines. Prompts are selected randomly for each turn.
 
 ```txt
 Explain the difference between Machine Learning and Deep Learning
 Write Python code for a simple to-do list
 What are the pros and cons of microservices?
-How can I increase my productivity when working from home?
-Explain the concept of REST APIs in simple terms
 ```
+
+#### Included Prompt Files
+
+| File | Description |
+|------|-------------|
+| `prompts_english.txt` | ~108 business prompts (emails, HR, finance, IT, strategy) |
+| `prompts_long_context.txt` | 8 prompts with 600–900 words of inline document content — tests long-context handling |
+
+### System Prompts File (`--system-prompts`)
+
+Optional. One enterprise assistant persona per line, assigned randomly at the start of each conversation session. This ensures different simulated users operate under different contexts, preventing KV-cache prefix sharing.
+
+```txt
+You are an IT support assistant. Help employees resolve technical issues...
+You are an HR policy assistant. Answer employee questions about benefits...
+You are a project management assistant. Support project managers with planning...
+```
+
+#### Included System Prompts File
+
+| File | Description |
+|------|-------------|
+| `system_prompts.txt` | 18 enterprise personas (IT, HR, legal, finance, procurement, security, etc.) |
 
 ### Best Practices for Prompts
 
-**1. Collect realistic prompts:**
-- Ask your employees for typical questions
-- Analyze existing chat logs
-- Use different prompt lengths
-
-**2. Cover different categories:**
-- Short factual questions
-- Longer explanation requests
-- Code generation
-- Creative tasks
-- Problem solving
-
-**3. Example of a balanced prompts file:**
-```txt
-What is Python?
-Explain the MVC pattern in detail with examples
-def fibonacci(n): # complete this function
-Write an email to a customer regarding project delays
-How do I optimize the performance of a MySQL database?
-What does CI/CD mean?
-Create a business plan for a tech startup in the AI field
-Debug this JavaScript code: function add(a,b) { return a+b }
-```
+- Collect realistic prompts from your own use case or chat logs
+- Mix short factual questions with longer generation tasks
+- Use `prompts_long_context.txt` to simulate document Q&A workloads
+- Keep each prompt on a single line
 
 ## Test Duration and Timing Behavior
 
-**Important:** The specified `--test-duration` defines only the **active request phase**, not the total test duration.
+The `--test-duration` defines the **active request phase**, not the total wall-clock time.
 
-### Test Phases:
+### Test Phases
 
-#### **Phase 1: Active Request Phase (e.g., 5 minutes)**
-- New requests are continuously sent
-- Users start requests until the end of the specified duration
-- Example: With `--test-duration 300`, new requests are started for 5 minutes
+**Phase 1 – Active Phase** (e.g., 5 minutes): Users continuously start new sessions and turns until the duration expires.
 
-#### **Phase 2: Waiting Phase (variable duration)**  
-- **No new requests** anymore
-- Waits for completion of **all running requests**
-- Duration depends on model performance and current load
-
-### Timing Example:
+**Phase 2 – Drain Phase** (variable): No new requests are started; the tool waits for all in-flight requests to complete.
 
 ```
-00:00 - Test starts, first requests are sent
-00:00-05:00 - Active phase: Continuously new requests  
-04:58 - Last new request is started
-05:00 - NO new requests anymore
-05:00-06:15 - Waiting phase: Running requests are completed
-06:15 - Test finished (Total duration: 6:15 instead of 5:00)
+00:00       Test starts, first sessions begin
+00:00–05:00 Active phase: new turns started continuously
+05:00       No new requests
+05:00–06:15 Drain phase: running requests finish
+06:15       Test done (total: 6m 15s instead of 5m)
 ```
 
-### Why Tests May Take Longer:
+### Automatic Termination on Overload
 
-**With normal performance:**
-- Request duration: 2-5 seconds
-- Waiting phase: A few seconds
-- **Total duration ≈ specified test duration**
-
-**With high load/slow model:**
-- Request duration: 30-60 seconds or more
-- Waiting phase: Up to several minutes
-- **Total duration can be significantly longer**
-
-### Automatic Termination on Overload:
-
-- **Monitoring**: Error rate is checked every 30 seconds
-- **Termination criterion**: > 30% error rate with at least 10 requests
-- **Immediate stop**: Test is terminated early, all processes killed
+- Error rate is checked every 30 seconds
+- If error rate > 30% with at least 10 requests, the step is aborted
+- Further steps with higher user counts for that model are skipped
 
 ```
-[Intermediate status] Requests: 15, Error rate: 35.2%
+[Progress] Requests: 15, Error rate: 35.2%
 ⚠️ ABORT: Error rate (35.2%) exceeds 30%!
-System is overloaded - test is being aborted.
 ```
 
 ## Interpreting Results
 
-The tool automatically runs multiple tests and shows progress for each step:
+### Live Output
 
 ```
 TESTING MODEL: llama2
-================================
-[Step 2/12] Testing 10 users with llama2...
-[User 3] ✓ 4.23s (TTFT: 1.45s) - Explain the difference between...
-[User 7] ✗ Timeout
-[User 1] ✓ 2.45s (TTFT: 0.89s) - What is Python?...
-
-TESTING MODEL: mistral  
-================================
-[Step 8/12] Testing 10 users with mistral...
-[User 2] ✓ 1.89s (TTFT: 0.67s) - Write Python code for...
+[Step 2/8] Testing 10 users with llama2...
+[User 3|turn 1] ✓ 4.23s (TTFT: 1.45s, TPOT: 0.042s) - Explain the difference between...
+[User 7|turn 2] ✗ Timeout - restarting session
+[User 1|turn 3] ✓ 2.45s (TTFT: 0.89s, TPOT: 0.031s) - What is Python?...
 ```
 
-### Automatic Results Table
-
-At the end, you get a clear overview table:
+### Results Table
 
 ```
 LOAD TEST RESULTS
-======================================================================================================
-Users    Model   GPU      Avg. Time  TTFT    Max. Time  Min. Time  Error Rate  CPU %   Memory %  Requests   Recommendation
-5        llama2   A2000    2.34       1.12    4.12       1.23       0.0         45.2    62.1      245        ✅ Optimal
-10       llama2   A2000    3.78       1.89    7.45       1.45       2.1         78.3    68.4      467        ⚠️ Unstable
-15       llama2   A2000    5.23       3.45    12.34      1.67       5.4         89.1    72.3      623        ❌ Overloaded
-5        mistral  A2000    1.89       0.78    3.21       0.98       0.0         38.1    58.9      267        ✅ Optimal
-10       mistral  A2000    2.45       1.23    5.67       1.12       1.4         65.4    62.3      523        ✅ Good
-15       mistral  A2000    3.12       2.67    8.93       1.34       3.2         72.8    67.1      587        ⚠️ Unstable
+Users  Model    LLM Provider  GPU    Avg. Time  TTFT    TPOT    Max. Time  Error Rate  Recommendation
+5      llama2   Ollama        A2000  2.34       1.12    0.038   4.12       0.0         ✅ Optimal
+10     llama2   Ollama        A2000  3.78       1.89    0.051   7.45       2.1         ⚠️ Unstable
+15     llama2   Ollama        A2000  5.23       3.45    0.078   12.34      5.4         ❌ Overloaded
 ```
 
-### Important Metrics
+### Metrics Reference
 
-**Monitor Response Times:**
-- **Avg. Time**: Complete response time from request to full answer
-- **TTFT (Time-to-First-Token)**: Time until first token - critical for UX
-- **< 2 seconds TTFT**: Optimal for user experience
-- **2-5 seconds TTFT**: Good performance
-- **5-10 seconds TTFT**: Acceptable
-- **> 10 seconds TTFT**: Perceived as slow
+**TTFT (Time-to-First-Token)** — primary UX metric:
 
-**Observe Error Rate (critical for stability):**
-- **0-2%**: Production-ready ✅
-- **2-5%**: Unstable, still tolerable ⚠️
-- **5-10%**: Overloaded ❌
-- **> 10%**: Critical problems ❌
+| TTFT | Assessment |
+|------|-----------|
+| < 2 s | Optimal |
+| 2–5 s | Good |
+| 5–10 s | Acceptable |
+| 10–20 s | Slow |
+| > 20 s | Unacceptable |
 
-### Identifying Capacity Limits
+**TPOT (Time Per Output Token)** — generation throughput:
+- Typical range: 0.02–0.10 s/token
+- Lower is better; rising TPOT under load indicates GPU saturation
 
-**Finding Optimal Capacity:**
-1. **Stable Performance**: Response times remain constant, error rate under 5%
-2. **Beginning Overload**: Response times increase significantly
-3. **Critical Overload**: Error rate over 15%, very high CPU usage
+**Error Rate** — stability indicator:
 
-**Model Comparison:**
-In the table, you can directly compare different models:
-- **mistral**: Faster TTFT (0.78s vs 1.12s), better stability
-- **llama2**: Slightly slower TTFT, becomes unstable at higher load
-- **Optimal Capacity**: mistral handles more users with the same hardware
+| Error Rate | Assessment |
+|------------|-----------|
+| 0–2% | Production-ready |
+| 2–5% | Unstable, tolerable |
+| 5–10% | Overloaded |
+| > 10% | Critical |
 
-**Understanding Automatic Assessment:**
-- **✅ Optimal/Good**: TTFT < 5s, error rate < 2%
-- **✅ Acceptable**: TTFT 5-10s, stable performance
-- **⚠️ Unstable/Slow**: TTFT > 10s or error rate 2-5%
-- **❌ Overloaded**: Error rate 5-10%, performance issues
-- **❌ Critical**: Error rate > 10%, not production-ready
+### Multi-Turn vs. Single-Turn Results
 
-**Example Interpretation:**
-- **mistral with 10 users**: ✅ Good - Optimal production range
-- **llama2 with 15 users**: ❌ Overloaded - Capacity limit exceeded
+Multi-turn mode measures capacity under realistic chat load, where each turn adds to the model's input context. Expect ~30–40% lower throughput compared to single-turn benchmarks. The `summary.md` includes a note with the applicable correction factor.
+
+To compare directly:
+```bash
+# Realistic capacity
+python llm_load_test.py --mode multi-turn --users 30 --model llama2 --llm-provider "Ollama" --prompts prompts_english.txt
+
+# Peak throughput
+python llm_load_test.py --mode single-turn --users 30 --model llama2 --llm-provider "Ollama" --prompts prompts_english.txt
+```
 
 ## Best Practices
 
-### Test Planning
+### Start with a Baseline
 
-**1. Gradual Increase (automatic):**
 ```bash
-# The tool automatically runs tests with 5, 10, 15, 20, 25 users
-python llm_load_test.py --prompts prompts.txt --users 25 --model llama2 --llm-provider "Ollama"
+# Quick single-turn baseline (5 min, 1 step)
+python llm_load_test.py --prompts prompts_english.txt --users 5 --model llama2 --llm-provider "Ollama" \
+  --mode single-turn --step-size 5 --test-duration 120
 ```
 
-**2. Multi-Model Comparison:**
-```bash
-# Compare different models under identical conditions
-python llm_load_test.py --prompts prompts.txt --users 25 --model "llama2,mistral,codellama" --llm-provider "Ollama" --gpu "RTX A2000"
+### Realistic Production Test
 
-# Find the best model for your hardware
-python llm_load_test.py --prompts prompts.txt --users 30 --model "llama2,mistral" --llm-provider "vLLM" --gpu "RTX 4090"
+```bash
+python llm_load_test.py \
+  --prompts prompts_english.txt \
+  --system-prompts system_prompts.txt \
+  --users 30 \
+  --model llama2 \
+  --llm-provider "Ollama" \
+  --gpu "RTX A2000" \
+  --profile-mix 40:40:20 \
+  --turns-min 3 \
+  --turns-max 7
 ```
 
-**3. Different Pause Times:**
+### Multi-Model Comparison Under Identical Conditions
+
 ```bash
-# Fast users (stress test)
-python llm_load_test.py --prompts prompts.txt --users 40 --model llama2 --llm-provider "Ollama" --pause-min 1 --pause-max 3
-
-# Realistic users
-python llm_load_test.py --prompts prompts.txt --users 30 --model llama2 --llm-provider "Ollama" --pause-min 3 --pause-max 30
-
-# Slow users
-python llm_load_test.py --prompts prompts.txt --users 20 --model llama2 --llm-provider "Ollama" --pause-min 30 --pause-max 120
+python llm_load_test.py \
+  --prompts prompts_english.txt \
+  --system-prompts system_prompts.txt \
+  --users 25 \
+  --model "llama2,mistral,codellama" \
+  --llm-provider "Ollama" \
+  --gpu "RTX A2000"
 ```
 
-### Monitoring During Tests
+### Server-Side Monitoring
 
-**Monitor server side:**
 ```bash
-# Resource consumption
-htop
-iostat -x 1
-
-# GPU usage (if available)
-nvidia-smi -l 1
-
-# Network traffic
-iftop
-```
-
-**Follow API logs:**
-```bash
-# For Ollama (systemd-based)
-journalctl -u ollama -f
-
-# For other services, check their specific logs
-# vLLM usually logs to stdout
-# LM Studio has logs in the GUI
+htop                  # CPU and memory
+nvidia-smi -l 1       # GPU utilization and VRAM
+journalctl -u ollama -f   # Ollama logs
 ```
 
 ### Optimization Based on Results
 
-**For poor performance:**
-1. **Hardware upgrade**: More RAM, better CPU/GPU
-2. **Switch model**: Use smaller, faster model
-3. **Concurrent limits**: Limit maximum number of concurrent requests
-4. **Load balancing**: Use multiple backend instances
-5. **Try different backends**: Some backends are optimized differently (vLLM is often faster than Ollama)
+| Symptom | Action |
+|---------|--------|
+| High TPOT, low TTFT | GPU throughput bottleneck — consider smaller model or tensor parallelism |
+| High TTFT, low TPOT | Scheduling or batch size issue |
+| Rising error rate | Reduce concurrency, tune `OLLAMA_NUM_PARALLEL`, or add a second backend |
+| TPOT stays flat, TTFT rises | Context window growth — expected in multi-turn; reduce `--turns-max` |
 
-**Adjust configuration (examples):**
 ```bash
-# Ollama environment variables
-export OLLAMA_MAX_LOADED_MODELS=2
+# Ollama tuning
 export OLLAMA_NUM_PARALLEL=4
-export OLLAMA_HOST=0.0.0.0:11434
+export OLLAMA_MAX_LOADED_MODELS=2
 
-# vLLM: use tensor parallelism for large models
+# vLLM: tensor parallelism for large models
 python -m vllm.entrypoints.openai.api_server \
   --model <model> \
   --tensor-parallel-size 2
 ```
 
-### Documentation of Results
-
-The tool automatically creates a timestamped results folder with CSV data and Markdown summary (see [Output Files](#output-files)). Example of a typical multi-model evaluation:
-
-| Users | Model | GPU | TTFT | Avg. Time | Error Rate | CPU % | Recommendation |
-|-------|-------|-----|------|-----------|------------|-------|----------------|
-| 10    | llama2 | A2000 | 1.89s | 3.8s     | 2%         | 78%   | ⚠️ Unstable |
-| 10    | mistral| A2000 | 1.23s | 2.4s     | 1%         | 65%   | ✅ Good     |
-| 10    | codellama| A2000 | 2.45s | 4.2s   | 3%         | 82%   | ⚠️ Unstable |
-| 20    | llama2 | A2000 | 4.12s | 8.4s     | 12%        | 94%   | ❌ Critical |
-| 20    | mistral| A2000 | 2.67s | 4.1s     | 4%         | 78%   | ⚠️ Unstable |
-| 20    | codellama| A2000 | 6.23s | 9.8s   | 15%        | 96%   | ❌ Critical |
-
-**Conclusion:** mistral is the most performant model - stable up to 10 users, unstable but usable up to 20 users.
-
 ---
 
-## ⚠️ Disclaimer
+## Disclaimer
 
 **USE AT YOUR OWN RISK**
 
-This software is provided "as is" without warranty of any kind. The author(s) assume **NO LIABILITY** for any damages, losses, or issues that may occur from using this software, including but not limited to: data loss, hardware damage, system failures, network issues, natural disasters, cosmic events, or any other consequences whatsoever.
-
-By using this software, you acknowledge that you use it entirely at your own risk and take full responsibility for any outcomes.
+This software is provided "as is" without warranty of any kind. The author(s) assume **NO LIABILITY** for any damages, losses, or issues arising from its use, including but not limited to: data loss, hardware damage, system failures, or any other consequences.
 
 ## License
 
 This project is licensed under the **Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0)**.
 
-### 🆓 Non-Commercial Use (Free)
-- ✅ Personal use, education, research, open source projects
-
-### 💼 Commercial Use License
-For commercial use, open an issue in this repository or contact via GitHub.
+- **Non-commercial use** (personal, education, research, open source): free
+- **Commercial use**: open an issue or contact via GitHub
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)

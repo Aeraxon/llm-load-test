@@ -24,6 +24,21 @@ class APIAdapter:
         """
         raise NotImplementedError
 
+    def make_chat_request(self, model: str, messages: list, timeout: int = 120) -> Tuple[bool, float, float, float, str]:
+        """
+        Makes a chat completions request.
+
+        Args:
+            model: Model name
+            messages: List of dicts with 'role' and 'content' keys
+            timeout: Request timeout in seconds
+
+        Returns:
+            Tuple of (success, total_time, ttft, tpot, error_msg)
+            tpot = (total_time - ttft) / max(token_count - 1, 1)
+        """
+        raise NotImplementedError
+
     def check_connection(self) -> bool:
         """Check if the API is reachable"""
         raise NotImplementedError
@@ -87,6 +102,64 @@ class OllamaAdapter(APIAdapter):
             return False, 0.0, 0.0, "Connection Error"
         except Exception as e:
             return False, 0.0, 0.0, str(e)
+
+    def make_chat_request(self, model: str, messages: list, timeout: int = 120) -> Tuple[bool, float, float, float, str]:
+        import time
+
+        try:
+            start_time = time.time()
+            ttft_measured = False
+            first_token_time = 0.0
+            token_count = 0
+            eval_count = None
+
+            response = requests.post(
+                f"{self.base_url}/api/chat",
+                json={"model": model, "messages": messages, "stream": True},
+                timeout=timeout,
+                stream=True
+            )
+
+            if response.status_code == 200:
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line.decode('utf-8'))
+                            content = data.get("message", {}).get("content", "")
+
+                            if content and not ttft_measured:
+                                first_token_time = time.time() - start_time
+                                ttft_measured = True
+
+                            if content:
+                                token_count += 1
+
+                            if data.get("done") is True:
+                                eval_count = data.get("eval_count")
+                                break
+
+                        except json.JSONDecodeError:
+                            continue
+
+                elapsed_time = time.time() - start_time
+
+                if not ttft_measured:
+                    first_token_time = elapsed_time
+
+                if eval_count is not None:
+                    token_count = eval_count
+
+                tpot = (elapsed_time - first_token_time) / max(token_count - 1, 1)
+                return True, elapsed_time, first_token_time, tpot, ""
+            else:
+                return False, 0.0, 0.0, 0.0, f"HTTP {response.status_code}"
+
+        except requests.exceptions.Timeout:
+            return False, 0.0, 0.0, 0.0, "Timeout"
+        except requests.exceptions.ConnectionError:
+            return False, 0.0, 0.0, 0.0, "Connection Error"
+        except Exception as e:
+            return False, 0.0, 0.0, 0.0, str(e)
 
     def check_connection(self) -> bool:
         try:
@@ -169,6 +242,79 @@ class OpenAICompatibleAdapter(APIAdapter):
             return False, 0.0, 0.0, "Connection Error"
         except Exception as e:
             return False, 0.0, 0.0, str(e)
+
+    def make_chat_request(self, model: str, messages: list, timeout: int = 120) -> Tuple[bool, float, float, float, str]:
+        import time
+
+        try:
+            start_time = time.time()
+            ttft_measured = False
+            first_token_time = 0.0
+            token_count = 0
+            completion_tokens = None
+
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = f"Bearer {self.api_key}"
+
+            response = requests.post(
+                f"{self.base_url}/v1/chat/completions",
+                headers=headers,
+                json={"model": model, "messages": messages, "stream": True, "max_tokens": 2000},
+                timeout=timeout,
+                stream=True
+            )
+
+            if response.status_code == 200:
+                for line in response.iter_lines():
+                    if line:
+                        line_str = line.decode('utf-8')
+                        if line_str.startswith('data: '):
+                            line_str = line_str[6:]
+
+                        if line_str.strip() == '[DONE]':
+                            break
+
+                        try:
+                            data = json.loads(line_str)
+
+                            if 'choices' in data and len(data['choices']) > 0:
+                                content = data['choices'][0].get('delta', {}).get('content', '')
+
+                                if content and not ttft_measured:
+                                    first_token_time = time.time() - start_time
+                                    ttft_measured = True
+
+                                if content:
+                                    token_count += 1
+
+                            if 'usage' in data and data['usage']:
+                                ct = data['usage'].get('completion_tokens')
+                                if ct is not None:
+                                    completion_tokens = ct
+
+                        except json.JSONDecodeError:
+                            continue
+
+                elapsed_time = time.time() - start_time
+
+                if not ttft_measured:
+                    first_token_time = elapsed_time
+
+                if completion_tokens is not None:
+                    token_count = completion_tokens
+
+                tpot = (elapsed_time - first_token_time) / max(token_count - 1, 1)
+                return True, elapsed_time, first_token_time, tpot, ""
+            else:
+                return False, 0.0, 0.0, 0.0, f"HTTP {response.status_code}"
+
+        except requests.exceptions.Timeout:
+            return False, 0.0, 0.0, 0.0, "Timeout"
+        except requests.exceptions.ConnectionError:
+            return False, 0.0, 0.0, 0.0, "Connection Error"
+        except Exception as e:
+            return False, 0.0, 0.0, 0.0, str(e)
 
     def check_connection(self) -> bool:
         try:

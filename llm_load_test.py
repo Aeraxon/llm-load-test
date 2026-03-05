@@ -19,7 +19,7 @@ load_dotenv()
 
 @dataclass
 class TestResult:
-    """Datenklasse für Testergebnisse"""
+    """Data class for test results"""
     users: int
     model: str
     llm_provider: str
@@ -28,6 +28,7 @@ class TestResult:
     max_response_time: float
     min_response_time: float
     avg_ttft: float
+    avg_tpot: float
     error_rate: float
     total_requests: int
     successful_requests: int
@@ -38,7 +39,7 @@ class TestResult:
     recommendation: str
 
 class ResultCollector:
-    """Sammelt und verwaltet Testergebnisse"""
+    """Collects and manages test results"""
     def __init__(self):
         self.results = []
         self.lock = threading.Lock()
@@ -52,7 +53,7 @@ class ResultCollector:
             return self.results.copy()
 
 class SystemMonitor:
-    """Überwacht Systemressourcen während des Tests"""
+    """Monitors system resources during the test"""
     def __init__(self):
         self.cpu_samples = []
         self.memory_samples = []
@@ -88,43 +89,67 @@ class SystemMonitor:
     def get_average_memory(self):
         return sum(self.memory_samples) / len(self.memory_samples) if self.memory_samples else 0
 
-# Globale Variablen für Ergebnissammlung
+# Global shared variables for result collection across processes
 response_times = multiprocessing.Manager().list()
-ttft_times = multiprocessing.Manager().list()  # Time to First Token
+ttft_times = multiprocessing.Manager().list()
+tpot_times = multiprocessing.Manager().list()
 error_count = multiprocessing.Manager().Value('i', 0)
 success_count = multiprocessing.Manager().Value('i', 0)
 
 def reset_counters():
-    """Setzt die globalen Zähler zurück"""
-    global response_times, ttft_times, error_count, success_count
+    """Resets global counters before each test step"""
+    global response_times, ttft_times, tpot_times, error_count, success_count
     response_times[:] = []
     ttft_times[:] = []
+    tpot_times[:] = []
     error_count.value = 0
     success_count.value = 0
 
 def terminate_processes(processes):
-    """Signal-Handler für kontrollierten Abbruch"""
+    """Terminates all child processes"""
     for p in processes:
         if p.is_alive():
             p.terminate()
-    print("Alle Prozesse beendet.")
+    print("All processes terminated.")
 
 def load_prompts(file_path):
-    """Liest Prompts aus einer Textdatei ein."""
+    """Reads prompts from a text file, one prompt per line."""
     with open(file_path, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
+def assign_profiles(user_count, profile_mix_str, turns_min, turns_max):
+    """
+    Assigns a user profile to each simulated user index.
+
+    Profile mix is applied proportionally; remainder goes to Normal.
+    Returns a list of profile dicts, one per user (length == user_count).
+    """
+    parts = profile_mix_str.split(':')
+    power_pct, normal_pct, occasional_pct = int(parts[0]), int(parts[1]), int(parts[2])
+
+    power_count = int(user_count * power_pct / 100)
+    occasional_count = int(user_count * occasional_pct / 100)
+    normal_count = user_count - power_count - occasional_count  # remainder to Normal
+
+    profiles = []
+    for _ in range(power_count):
+        profiles.append({"name": "power", "pause_min": 2, "pause_max": 5, "turns": turns_max})
+    for _ in range(normal_count):
+        profiles.append({"name": "normal", "pause_min": 15, "pause_max": 45, "turns": (turns_min, turns_max)})
+    for _ in range(occasional_count):
+        profiles.append({"name": "occasional", "pause_min": 60, "pause_max": 120, "turns": turns_min})
+
+    return profiles
+
 def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type, base_url, api_key, test_duration):
-    """Simuliert einen Benutzer für eine bestimmte Testdauer"""
+    """Simulates a single-turn user for a fixed test duration (--mode single-turn)"""
     global response_times, ttft_times, error_count, success_count
 
-    # Create adapter for this process
     adapter = create_adapter(api_type, base_url, api_key)
 
     end_time = time.time() + test_duration
 
     while time.time() < end_time:
-        # Zufälligen Prompt auswählen
         prompt = random.choice(prompts)
 
         success, elapsed_time, first_token_time, error_msg = adapter.make_request(model, prompt, timeout=120)
@@ -135,53 +160,99 @@ def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type,
             success_count.value += 1
             print(f"[User {user_id}] ✓ {elapsed_time:.2f}s (TTFT: {first_token_time:.2f}s) - {prompt[:30]}...")
 
-            # Pause zwischen erfolgreichen Requests (nur wenn noch Zeit bleibt)
             if time.time() < end_time:
                 pause_time = random.uniform(pause_min, pause_max)
                 time.sleep(min(pause_time, end_time - time.time()))
         else:
             error_count.value += 1
-            print(f"[User {user_id}] ✗ {error_msg} - Retry sofort...")
-            # Bei Fehler/Timeout: Sofort neuen Versuch ohne Pause
+            print(f"[User {user_id}] ✗ {error_msg} - retrying immediately...")
             continue
 
+def llm_chat_multiturn(model, prompts, system_prompts, user_id, profile,
+                       turns_min, turns_max, api_type, base_url, api_key, test_duration):
+    """Simulates a multi-turn chat user for a fixed test duration (--mode multi-turn)"""
+    global response_times, ttft_times, tpot_times, error_count, success_count
+
+    adapter = create_adapter(api_type, base_url, api_key)
+    end_time = time.time() + test_duration
+
+    while time.time() < end_time:
+        # Start a new conversation session
+        messages = []
+        if system_prompts:
+            messages.append({"role": "system", "content": random.choice(system_prompts)})
+
+        # Determine turn count for this session
+        if isinstance(profile["turns"], int):
+            turns = profile["turns"]
+        else:
+            turns = random.randint(profile["turns"][0], profile["turns"][1])
+
+        for turn in range(turns):
+            if time.time() >= end_time:
+                break
+
+            prompt = random.choice(prompts)
+            messages.append({"role": "user", "content": prompt})
+
+            success, elapsed, ttft, tpot, error = adapter.make_chat_request(model, messages, timeout=120)
+
+            if success:
+                response_times.append(elapsed)
+                ttft_times.append(ttft)
+                tpot_times.append(tpot)
+                success_count.value += 1
+                messages.append({"role": "assistant", "content": "[response]"})
+                print(f"[User {user_id}|turn {turn+1}] ✓ {elapsed:.2f}s (TTFT: {ttft:.2f}s, TPOT: {tpot:.3f}s) - {prompt[:30]}...")
+            else:
+                error_count.value += 1
+                print(f"[User {user_id}|turn {turn+1}] ✗ {error} - restarting session")
+                break  # abandon this session on error, start fresh next loop
+
+        # Pause between sessions according to profile
+        remaining = end_time - time.time()
+        if remaining > 0:
+            pause = random.uniform(profile["pause_min"], profile["pause_max"])
+            time.sleep(min(pause, remaining))
+
 def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft):
-    """Erstellt eine Empfehlung basierend auf TTFT und anderen Metriken"""
-    # Fehlerrate hat höchste Priorität
+    """Generates a recommendation based on TTFT and error rate"""
     if error_rate > 10:
-        return "❌ Kritisch"
+        return "❌ Critical"
     elif error_rate > 5:
-        return "❌ Überlastet"
+        return "❌ Overloaded"
     elif error_rate > 2:
-        return "⚠️ Instabil"
-    # Dann TTFT-basierte Bewertung
+        return "⚠️ Unstable"
     elif avg_ttft > 30:
-        return "❌ Inakzeptabel"
+        return "❌ Unacceptable"
     elif avg_ttft > 20:
-        return "⚠️ Sehr langsam"
+        return "⚠️ Very slow"
     elif avg_ttft > 10:
-        return "⚠️ Langsam"
+        return "⚠️ Slow"
     elif avg_ttft > 5:
-        return "✅ Akzeptabel"
+        return "✅ Acceptable"
     elif avg_ttft > 2:
-        return "✅ Gut"
+        return "✅ Good"
     else:
         return "✅ Optimal"
 
 def check_api_connection(adapter):
-    """Prüft ob die API erreichbar ist"""
+    """Checks if the API is reachable"""
     return adapter.check_connection()
 
-def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duration, api_type, base_url, api_key, gpu_name, llm_provider):
-    """Führt einen Load-Test mit einer bestimmten Anzahl von Benutzern durch"""
+def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duration,
+                  api_type, base_url, api_key, gpu_name, llm_provider,
+                  mode='multi-turn', system_prompts_list=None,
+                  turns_min=3, turns_max=7, profiles=None):
+    """Runs a load test with a given number of simulated users"""
     reset_counters()
 
     print(f"\n{'='*60}")
-    print(f"Test mit {user_count} Benutzern gestartet...")
-    print(f"Testdauer: {test_duration/60:.1f} Minuten")
+    print(f"Starting test with {user_count} users...")
+    print(f"Test duration: {test_duration/60:.1f} minutes")
+    print(f"Mode: {mode}")
     print(f"{'='*60}")
 
-    # System-Monitoring starten
     monitor = SystemMonitor()
     monitor.start_monitoring()
 
@@ -189,73 +260,75 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
     start_time = time.time()
 
     try:
-        # Alle Benutzer gleichzeitig starten
         for user_id in range(user_count):
-            p = multiprocessing.Process(
-                target=llm_chat_continuous,
-                args=(model, prompts, user_id, pause_min, pause_max, api_type, base_url, api_key, test_duration)
-            )
+            if mode == 'multi-turn':
+                profile = profiles[user_id] if profiles else {
+                    "name": "normal", "pause_min": pause_min, "pause_max": pause_max,
+                    "turns": (turns_min, turns_max)
+                }
+                p = multiprocessing.Process(
+                    target=llm_chat_multiturn,
+                    args=(model, prompts, system_prompts_list, user_id, profile,
+                          turns_min, turns_max, api_type, base_url, api_key, test_duration)
+                )
+            else:
+                p = multiprocessing.Process(
+                    target=llm_chat_continuous,
+                    args=(model, prompts, user_id, pause_min, pause_max,
+                          api_type, base_url, api_key, test_duration)
+                )
             p.start()
             processes.append(p)
-
-            # Kleine Verzögerung zwischen Starts zur Verteilung
             time.sleep(0.1)
 
-        print(f"Alle {user_count} Benutzer gestartet. Warte {test_duration/60:.1f} Minuten...")
+        print(f"All {user_count} users started. Waiting {test_duration/60:.1f} minutes...")
 
-        # Überwachungsschleife mit Abbruchkriterium
-        check_interval = 30  # Prüfe alle 30 Sekunden
+        check_interval = 30
         next_check = time.time() + check_interval
 
         while any(p.is_alive() for p in processes):
             time.sleep(1)
 
-            # Alle 30 Sekunden Timeout-Rate prüfen
             if time.time() >= next_check:
                 total_requests = success_count.value + error_count.value
-                if total_requests >= 10:  # Mindestens 10 Requests für aussagekräftige Statistik
+                if total_requests >= 10:
                     timeout_rate = (error_count.value / total_requests) * 100
-                    print(f"[Zwischenstand] Requests: {total_requests}, Fehlerrate: {timeout_rate:.1f}%")
+                    print(f"[Progress] Requests: {total_requests}, Error rate: {timeout_rate:.1f}%")
 
                     if timeout_rate > 30:
-                        print(f"\n⚠️ ABBRUCH: Fehlerrate ({timeout_rate:.1f}%) überschreitet 30%!")
-                        print("System ist überlastet - Test wird abgebrochen.")
+                        print(f"\n⚠️ ABORT: Error rate ({timeout_rate:.1f}%) exceeds 30%!")
+                        print("System is overloaded - aborting test.")
                         break
 
                 next_check = time.time() + check_interval
 
-        # Alle Prozesse beenden
         for p in processes:
             if p.is_alive():
                 p.terminate()
 
-        # Kurz warten, damit Prozesse sauber beenden
         time.sleep(2)
 
     except KeyboardInterrupt:
-        print("\nTest abgebrochen...")
+        print("\nTest aborted...")
         terminate_processes(processes)
         return None
     finally:
-        # Sicherstellen, dass alle Prozesse beendet sind
         for p in processes:
             if p.is_alive():
                 p.terminate()
 
-    # System-Monitoring stoppen
     monitor.stop_monitoring()
     actual_duration = time.time() - start_time
 
-    # Ergebnisse auswerten
     times = list(response_times)
     ttft_list = list(ttft_times)
+    tpot_list = list(tpot_times)
     total_requests = success_count.value + error_count.value
 
     if not times:
-        print(f"Keine erfolgreichen Requests in {user_count}-Benutzer-Test!")
+        print(f"No successful requests in {user_count}-user test!")
         return None
 
-    # Empfehlung generieren (jetzt basierend auf TTFT)
     recommendation = get_recommendation(
         sum(times) / len(times),
         max(times),
@@ -272,7 +345,8 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
         avg_response_time=sum(times) / len(times),
         max_response_time=max(times),
         min_response_time=min(times),
-        avg_ttft=sum(ttft_list) / len(ttft_list) if ttft_list else 0,
+        avg_ttft=sum(ttft_list) / len(ttft_list) if ttft_list else 0.0,
+        avg_tpot=sum(tpot_list) / len(tpot_list) if tpot_list else 0.0,
         error_rate=(error_count.value / total_requests * 100) if total_requests > 0 else 0,
         total_requests=total_requests,
         successful_requests=success_count.value,
@@ -283,316 +357,337 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
         recommendation=recommendation
     )
 
-    print(f"\nTest abgeschlossen:")
-    print(f"  Erfolgreiche Requests: {result.successful_requests}")
-    print(f"  Fehlgeschlagene Requests: {result.failed_requests}")
-    print(f"  Durchschnittliche Antwortzeit: {result.avg_response_time:.2f}s")
-    print(f"  Durchschnittliche TTFT: {result.avg_ttft:.2f}s")
-    print(f"  Maximale Antwortzeit: {result.max_response_time:.2f}s")
-    print(f"  Fehlerrate: {result.error_rate:.1f}%")
-    print(f"  CPU-Auslastung: {result.cpu_usage:.1f}%")
+    print(f"\nTest completed:")
+    print(f"  Successful requests: {result.successful_requests}")
+    print(f"  Failed requests: {result.failed_requests}")
+    print(f"  Average response time: {result.avg_response_time:.2f}s")
+    print(f"  Average TTFT: {result.avg_ttft:.2f}s")
+    print(f"  Average TPOT: {result.avg_tpot:.3f}s")
+    print(f"  Max response time: {result.max_response_time:.2f}s")
+    print(f"  Error rate: {result.error_rate:.1f}%")
+    print(f"  CPU usage: {result.cpu_usage:.1f}%")
 
     return result
 
 def print_results_table(results: List[TestResult]):
-    """Gibt die Ergebnistabelle aus"""
+    """Prints the results table to stdout"""
     if not results:
-        print("Keine Ergebnisse zum Anzeigen.")
+        print("No results to display.")
         return
 
-    print(f"\n{'='*153}")
-    print("LOAD TEST ERGEBNISSE")
-    print(f"{'='*153}")
+    print(f"\n{'='*165}")
+    print("LOAD TEST RESULTS")
+    print(f"{'='*165}")
 
-    # Header
-    print(f"{'Benutzer':<8} {'Modell':<15} {'LLM Provider':<15} {'GPU':<12} {'Avg. Zeit':<10} {'TTFT':<8} {'Max. Zeit':<10} {'Min. Zeit':<10} {'Fehlerrate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Empfehlung':<12}")
-    print(f"{'-'*8} {'-'*15} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*12}")
+    print(f"{'Users':<8} {'Model':<15} {'LLM Provider':<15} {'GPU':<12} {'Avg. Time':<10} {'TTFT':<8} {'TPOT':<8} {'Max. Time':<10} {'Min. Time':<10} {'Error Rate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Recommendation':<15}")
+    print(f"{'-'*8} {'-'*15} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*15}")
 
-    # Datenzeilen
     for result in results:
-        print(f"{result.users:<8} {result.model:<15} {result.llm_provider:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<12}")
+        print(f"{result.users:<8} {result.model:<15} {result.llm_provider:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.avg_tpot:<8.3f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<15}")
 
-    print(f"{'-'*153}")
+    print(f"{'-'*165}")
 
 def save_results_to_file(results: List[TestResult], filename: str):
-    """Speichert Ergebnisse in eine CSV-Datei"""
+    """Saves results to a CSV file"""
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            # CSV-Header
-            f.write("Benutzer,Modell,LLM_Provider,GPU,Avg_Antwortzeit,Avg_TTFT,Max_Antwortzeit,Min_Antwortzeit,Fehlerrate,CPU_Prozent,Memory_Prozent,Total_Requests,Erfolgreiche_Requests,Fehlgeschlagene_Requests,Testdauer,Empfehlung\n")
+            f.write("Users,Model,LLM_Provider,GPU,Avg_Response_Time,Avg_TTFT,Avg_TPOT,Max_Response_Time,Min_Response_Time,Error_Rate,CPU_Percent,Memory_Percent,Total_Requests,Successful_Requests,Failed_Requests,Test_Duration,Recommendation\n")
 
-            # Datenzeilen
             for result in results:
-                f.write(f"{result.users},{result.model},{result.llm_provider},{result.gpu},{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.max_response_time:.3f},{result.min_response_time:.3f},{result.error_rate:.2f},{result.cpu_usage:.2f},{result.memory_usage:.2f},{result.total_requests},{result.successful_requests},{result.failed_requests},{result.test_duration:.1f},{result.recommendation}\n")
+                f.write(f"{result.users},{result.model},{result.llm_provider},{result.gpu},"
+                        f"{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.avg_tpot:.4f},"
+                        f"{result.max_response_time:.3f},{result.min_response_time:.3f},"
+                        f"{result.error_rate:.2f},{result.cpu_usage:.2f},{result.memory_usage:.2f},"
+                        f"{result.total_requests},{result.successful_requests},{result.failed_requests},"
+                        f"{result.test_duration:.1f},{result.recommendation}\n")
 
-        print(f"\nCSV gespeichert: {filename}")
+        print(f"\nCSV saved: {filename}")
     except Exception as e:
-        print(f"Fehler beim Speichern der CSV: {e}")
+        print(f"Error saving CSV: {e}")
 
 def save_results_to_markdown(results: List[TestResult], filename: str, test_config: dict):
-    """Speichert Ergebnisse als Markdown-Zusammenfassung"""
+    """Saves results as a Markdown summary"""
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            # Header
-            f.write("# LLM Load Test - Zusammenfassung\n\n")
+            f.write("# LLM Load Test - Summary\n\n")
 
-            # Test-Konfiguration
-            f.write("## Test-Konfiguration\n\n")
-            f.write(f"- **Datum/Zeit**: {test_config['timestamp']}\n")
+            f.write("## Test Configuration\n\n")
+            f.write(f"- **Date/Time**: {test_config['timestamp']}\n")
             f.write(f"- **LLM Provider**: {test_config['llm_provider']}\n")
-            f.write(f"- **API Typ**: {test_config['api_type']}\n")
+            f.write(f"- **API Type**: {test_config['api_type']}\n")
             f.write(f"- **Base URL**: {test_config['base_url']}\n")
-            f.write(f"- **Modelle**: {test_config['models']}\n")
+            f.write(f"- **Models**: {test_config['models']}\n")
             f.write(f"- **GPU**: {test_config['gpu']}\n")
-            f.write(f"- **Testdauer pro Schritt**: {test_config['test_duration']/60:.1f} Minuten\n")
-            f.write(f"- **Pausenzeiten**: {test_config['pause_min']}-{test_config['pause_max']} Sekunden\n")
-            f.write(f"- **Benutzer-Schritte**: {test_config['user_steps']}\n\n")
+            f.write(f"- **Mode**: {test_config['mode']}\n")
+            f.write(f"- **Test Duration per Step**: {test_config['test_duration']/60:.1f} minutes\n")
+            f.write(f"- **Pause Times**: {test_config['pause_min']}–{test_config['pause_max']} seconds\n")
+            f.write(f"- **User Steps**: {test_config['user_steps']}\n")
+            if test_config['mode'] == 'multi-turn':
+                f.write(f"- **Profile Mix (Power:Normal:Occasional)**: {test_config['profile_mix']}\n")
+                f.write(f"- **Turns per Session**: {test_config['turns_min']}–{test_config['turns_max']}\n")
+            f.write("\n")
 
-            # Ergebnisse gruppiert nach Modell
             models = list(set([r.model for r in results]))
 
             for model in models:
-                f.write(f"## Ergebnisse: {model}\n\n")
+                f.write(f"## Results: {model}\n\n")
                 model_results = [r for r in results if r.model == model]
 
-                # Tabelle
-                f.write("| Benutzer | Avg. Zeit (s) | TTFT (s) | Max. Zeit (s) | Fehlerrate (%) | CPU (%) | Memory (%) | Requests | Empfehlung |\n")
-                f.write("|----------|---------------|----------|---------------|----------------|---------|------------|----------|------------|\n")
+                f.write("| Users | Avg. Time (s) | TTFT (s) | TPOT (s) | Max. Time (s) | Error Rate (%) | CPU (%) | Memory (%) | Requests | Recommendation |\n")
+                f.write("|-------|---------------|----------|----------|---------------|----------------|---------|------------|----------|----------------|\n")
 
                 for result in model_results:
-                    f.write(f"| {result.users} | {result.avg_response_time:.2f} | {result.avg_ttft:.2f} | {result.max_response_time:.2f} | {result.error_rate:.1f} | {result.cpu_usage:.1f} | {result.memory_usage:.1f} | {result.total_requests} | {result.recommendation} |\n")
+                    f.write(f"| {result.users} | {result.avg_response_time:.2f} | {result.avg_ttft:.2f} | {result.avg_tpot:.3f} | {result.max_response_time:.2f} | {result.error_rate:.1f} | {result.cpu_usage:.1f} | {result.memory_usage:.1f} | {result.total_requests} | {result.recommendation} |\n")
 
                 f.write("\n")
 
-                # Zusammenfassung für dieses Modell
                 best_result = max(model_results, key=lambda r: r.users if r.error_rate < 10 else 0)
-                f.write(f"### Zusammenfassung\n\n")
-                f.write(f"- **Beste Performance**: {best_result.users} gleichzeitige Benutzer\n")
-                f.write(f"- **Durchschnittliche TTFT**: {best_result.avg_ttft:.2f}s\n")
-                f.write(f"- **Durchschnittliche Antwortzeit**: {best_result.avg_response_time:.2f}s\n")
-                f.write(f"- **Fehlerrate**: {best_result.error_rate:.1f}%\n\n")
+                f.write("### Summary\n\n")
+                f.write(f"- **Best performance**: {best_result.users} concurrent users\n")
+                f.write(f"- **Average TTFT**: {best_result.avg_ttft:.2f}s\n")
+                f.write(f"- **Average TPOT**: {best_result.avg_tpot:.3f}s\n")
+                f.write(f"- **Average response time**: {best_result.avg_response_time:.2f}s\n")
+                f.write(f"- **Error rate**: {best_result.error_rate:.1f}%\n\n")
 
-            # Gesamtzusammenfassung
-            f.write("## Gesamtzusammenfassung\n\n")
+            f.write("## Overall Summary\n\n")
             total_requests = sum(r.total_requests for r in results)
             total_successful = sum(r.successful_requests for r in results)
             total_failed = sum(r.failed_requests for r in results)
             avg_ttft_all = sum(r.avg_ttft for r in results) / len(results) if results else 0
 
-            f.write(f"- **Gesamt Requests**: {total_requests}\n")
-            f.write(f"- **Erfolgreiche Requests**: {total_successful}\n")
-            f.write(f"- **Fehlgeschlagene Requests**: {total_failed}\n")
-            f.write(f"- **Durchschnittliche TTFT (alle Tests)**: {avg_ttft_all:.2f}s\n")
-            f.write(f"- **Gesamtfehlerrate**: {(total_failed/total_requests*100) if total_requests > 0 else 0:.1f}%\n\n")
+            f.write(f"- **Total requests**: {total_requests}\n")
+            f.write(f"- **Successful requests**: {total_successful}\n")
+            f.write(f"- **Failed requests**: {total_failed}\n")
+            f.write(f"- **Average TTFT (all tests)**: {avg_ttft_all:.2f}s\n")
+            f.write(f"- **Overall error rate**: {(total_failed/total_requests*100) if total_requests > 0 else 0:.1f}%\n\n")
 
-            # Empfehlungen
-            f.write("## Empfehlungen\n\n")
+            f.write("## Recommendations\n\n")
 
-            # Finde besten Test (höchste Benutzeranzahl mit < 10% Fehlerrate)
             good_results = [r for r in results if r.error_rate < 10]
             if good_results:
                 best = max(good_results, key=lambda r: r.users)
-                f.write(f"- Empfohlene maximale Benutzeranzahl: **{best.users} gleichzeitige Benutzer**\n")
-                f.write(f"- Bei dieser Last: TTFT {best.avg_ttft:.2f}s, Fehlerrate {best.error_rate:.1f}%\n")
+                f.write(f"- Recommended maximum concurrent users: **{best.users}**\n")
+                f.write(f"- At this load: TTFT {best.avg_ttft:.2f}s, error rate {best.error_rate:.1f}%\n")
             else:
-                f.write("- ⚠️ Alle Tests zeigten hohe Fehlerraten (>10%). System ist überlastet.\n")
+                f.write("- ⚠️ All tests showed high error rates (>10%). System is overloaded.\n")
+
+            if test_config.get('mode') == 'multi-turn':
+                f.write("\n> **Note:** Results reflect realistic multi-turn chat load. Apply a 0.6–0.7 correction factor compared to single-turn benchmarks.\n")
 
             f.write("\n")
 
-        print(f"Markdown gespeichert: {filename}")
+        print(f"Markdown saved: {filename}")
     except Exception as e:
-        print(f"Fehler beim Speichern der Markdown-Datei: {e}")
+        print(f"Error saving Markdown file: {e}")
 
 def create_results_directory():
-    """Erstellt einen Ergebnis-Ordner mit Timestamp"""
-    import os
-
-    # Basis-Verzeichnis für Ergebnisse
+    """Creates a timestamped results directory"""
     base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-
-    # Ordner mit Timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     result_dir = os.path.join(base_dir, timestamp)
-
-    # Verzeichnisse erstellen
     os.makedirs(result_dir, exist_ok=True)
-
     return result_dir, timestamp
 
 def main():
-    parser = argparse.ArgumentParser(description="Schrittweises Load Testing für LLM APIs (Ollama, vLLM, LM Studio, llama.cpp, etc.)")
+    parser = argparse.ArgumentParser(
+        description="Step-by-step load testing for LLM APIs (Ollama, vLLM, LM Studio, llama.cpp, etc.)"
+    )
     parser.add_argument("--prompts", type=str, required=True,
-                       help="Pfad zur Prompts-Datei")
+                        help="Path to prompts file")
     parser.add_argument("--users", type=int, required=True,
-                       help="Maximale Anzahl der Benutzer (wird schrittweise erreicht)")
+                        help="Maximum number of users (reached incrementally)")
     parser.add_argument("--model", type=str, required=True,
-                       help="Modell(e), kommagetrennt für mehrere Modelle")
+                        help="Model(s), comma-separated for multiple models")
     parser.add_argument("--llm-provider", type=str, required=True,
-                       help="LLM Provider Name (z.B. 'Ollama', 'vLLM', 'LM Studio', etc.)")
+                        help="LLM provider name (e.g. 'Ollama', 'vLLM', 'LM Studio')")
     parser.add_argument("--gpu", type=str, default="Unknown",
-                       help="GPU-Bezeichnung für Dokumentation (Standard: Unknown)")
+                        help="GPU label for documentation (default: Unknown)")
     parser.add_argument("--pause-min", type=float, default=3.0,
-                       help="Minimale Pause zwischen Nachrichten in Sekunden (Standard: 3.0)")
+                        help="Minimum pause between messages in seconds (default: 3.0)")
     parser.add_argument("--pause-max", type=float, default=30.0,
-                       help="Maximale Pause zwischen Nachrichten in Sekunden (Standard: 30.0)")
+                        help="Maximum pause between messages in seconds (default: 30.0)")
     parser.add_argument("--step-size", type=int, default=5,
-                       help="Schrittgröße für Benutzererhöhung (Standard: 5)")
+                        help="User count increment per step (default: 5)")
     parser.add_argument("--test-duration", type=int, default=300,
-                       help="Testdauer pro Schritt in Sekunden (Standard: 300 = 5 Minuten)")
+                        help="Test duration per step in seconds (default: 300 = 5 minutes)")
     parser.add_argument("--host", type=str, default=None,
-                       help="API Host und Port (Standard: aus .env oder 127.0.0.1:11434)")
+                        help="API host and port (default: from .env or 127.0.0.1:11434)")
     parser.add_argument("--api-type", type=str, default=None,
-                       help="API Typ (ollama, vllm, lmstudio, llamacpp, openai) (Standard: aus .env oder ollama)")
+                        help="API type (ollama, vllm, lmstudio, llamacpp, openai)")
     parser.add_argument("--api-key", type=str, default=None,
-                       help="API Key für Authentifizierung (optional, aus .env wenn nicht angegeben)")
+                        help="API key for authentication (optional, from .env if not provided)")
     parser.add_argument("--output", type=str, default=None,
-                       help="Dateiname für CSV-Export (optional)")
+                        help="Custom CSV output filename (optional)")
+    parser.add_argument("--mode", type=str, choices=["multi-turn", "single-turn"], default="multi-turn",
+                        help="Test mode: multi-turn (default) or single-turn")
+    parser.add_argument("--system-prompts", type=str, default=None,
+                        help="Path to system prompts file (one per line)")
+    parser.add_argument("--turns-min", type=int, default=3,
+                        help="Minimum turns per multi-turn session (default: 3)")
+    parser.add_argument("--turns-max", type=int, default=7,
+                        help="Maximum turns per multi-turn session (default: 7)")
+    parser.add_argument("--profile-mix", type=str, default="40:40:20",
+                        help="Power:Normal:Occasional user mix, must sum to 100 (default: 40:40:20)")
 
     args = parser.parse_args()
 
-    # Konfiguration aus .env oder Command Line Arguments
+    # Validate --profile-mix
+    try:
+        profile_parts = [int(x) for x in args.profile_mix.split(':')]
+        if len(profile_parts) != 3 or sum(profile_parts) != 100:
+            print(f"Error: --profile-mix must be three integers summing to 100 (e.g. '40:40:20'), got '{args.profile_mix}'")
+            return
+    except ValueError:
+        print(f"Error: --profile-mix must be three colon-separated integers, got '{args.profile_mix}'")
+        return
+
+    # Validate turns range
+    if args.turns_min > args.turns_max:
+        print(f"Error: --turns-min ({args.turns_min}) must be <= --turns-max ({args.turns_max})")
+        return
+
+    # Resolve API configuration
     api_type = args.api_type or os.getenv('API_TYPE', 'ollama')
     api_key = args.api_key or os.getenv('API_KEY')
 
-    # Host/Base URL bestimmen
     if args.host:
         base_url = args.host if args.host.startswith(('http://', 'https://')) else f"http://{args.host}"
     else:
-        # Versuche aus .env zu lesen
         env_url = os.getenv('API_BASE_URL')
-        if env_url:
-            base_url = env_url
-        else:
-            # Fallback zu Standard Ollama
-            base_url = "http://127.0.0.1:11434"
+        base_url = env_url if env_url else "http://127.0.0.1:11434"
 
-    # Modelle aus kommagetrenntner Liste extrahieren
     models = [model.strip() for model in args.model.split(',') if model.strip()]
 
     if not models:
-        print("Fehler: Keine gültigen Modelle angegeben!")
+        print("Error: No valid models specified!")
         return
 
-    # Validierung
     if args.pause_min > args.pause_max:
-        print("Fehler: pause-min darf nicht größer als pause-max sein!")
+        print("Error: --pause-min must not be greater than --pause-max!")
         return
 
     if args.users <= 0 or args.step_size <= 0:
-        print("Fehler: users und step-size müssen größer als 0 sein!")
+        print("Error: --users and --step-size must be greater than 0!")
         return
 
-    # API-Adapter erstellen
     try:
         adapter = create_adapter(api_type, base_url, api_key)
     except ValueError as e:
-        print(f"Fehler: {e}")
+        print(f"Error: {e}")
         return
 
-    # API-Verbindung prüfen
-    print(f"Prüfe Verbindung zu {api_type.upper()} API ({base_url})...")
+    print(f"Checking connection to {api_type.upper()} API ({base_url})...")
     if not check_api_connection(adapter):
-        print(f"Fehler: Kann nicht zur API unter {base_url} verbinden!")
-        print(f"Stelle sicher, dass der {api_type.upper()} Server läuft.")
+        print(f"Error: Cannot connect to API at {base_url}!")
+        print(f"Make sure the {api_type.upper()} server is running.")
         return
 
-    print(f"✓ Verbindung zur {api_type.upper()} API erfolgreich")
+    print(f"✓ Connected to {api_type.upper()} API")
 
-    # Prompts laden
     try:
         prompts = load_prompts(args.prompts)
-        print(f"✓ {len(prompts)} Prompts aus {args.prompts} geladen")
+        print(f"✓ Loaded {len(prompts)} prompts from {args.prompts}")
     except FileNotFoundError:
-        print(f"Fehler: Prompts-Datei {args.prompts} nicht gefunden!")
+        print(f"Error: Prompts file {args.prompts} not found!")
         return
 
     if len(prompts) == 0:
-        print("Fehler: Keine Prompts in der Datei gefunden!")
+        print("Error: No prompts found in file!")
         return
 
-    # Test-Parameter anzeigen
-    print(f"\nSTARTE SCHRITTWEISES LOAD TESTING")
-    print(f"API Typ: {api_type.upper()}")
-    print(f"Base URL: {base_url}")
-    print(f"Modelle: {', '.join(models)}")
-    print(f"GPU: {args.gpu}")
-    print(f"Maximale Benutzer: {args.users}")
-    print(f"Schrittgröße: {args.step_size}")
-    print(f"Testdauer pro Schritt: {args.test_duration/60:.1f} Minuten")
-    print(f"Pausenzeiten: {args.pause_min}-{args.pause_max} Sekunden")
+    # Load system prompts if provided
+    system_prompts_list = None
+    if args.system_prompts:
+        try:
+            system_prompts_list = load_prompts(args.system_prompts)
+            print(f"✓ Loaded {len(system_prompts_list)} system prompts from {args.system_prompts}")
+        except FileNotFoundError:
+            print(f"Error: System prompts file {args.system_prompts} not found!")
+            return
 
-    # Schrittweise Tests durchführen
+    print(f"\nSTARTING STEP-BY-STEP LOAD TEST")
+    print(f"API Type: {api_type.upper()}")
+    print(f"Base URL: {base_url}")
+    print(f"Models: {', '.join(models)}")
+    print(f"GPU: {args.gpu}")
+    print(f"Mode: {args.mode}")
+    print(f"Max users: {args.users}")
+    print(f"Step size: {args.step_size}")
+    print(f"Test duration per step: {args.test_duration/60:.1f} minutes")
+    print(f"Pause times: {args.pause_min}–{args.pause_max} seconds")
+    if args.mode == 'multi-turn':
+        print(f"Profile mix (Power:Normal:Occasional): {args.profile_mix}")
+        print(f"Turns per session: {args.turns_min}–{args.turns_max}")
+
     results = []
     user_steps = list(range(args.step_size, args.users + 1, args.step_size))
 
-    # Falls die maximale Anzahl nicht durch step_size teilbar ist, hinzufügen
     if args.users not in user_steps:
         user_steps.append(args.users)
 
     total_steps = len(user_steps) * len(models)
     estimated_total_time = total_steps * args.test_duration / 60
 
-    print(f"Geplante Schritte: {user_steps}")
-    print(f"Geschätzte Gesamtdauer: {estimated_total_time:.1f} Minuten")
+    print(f"Planned steps: {user_steps}")
+    print(f"Estimated total duration: {estimated_total_time:.1f} minutes")
     print(f"Start: {datetime.now().strftime('%H:%M:%S')}")
 
     try:
         step_counter = 0
 
-        # Für jedes Modell alle Benutzer-Schritte durchführen
         for model in models:
             print(f"\n{'='*80}")
-            print(f"TESTE MODELL: {model}")
+            print(f"TESTING MODEL: {model}")
             print(f"{'='*80}")
 
-            model_overloaded = False  # Flag für Überlastung dieses Modells
+            model_overloaded = False
 
             for user_count in user_steps:
-                # Überspringe weitere Tests, wenn Modell bereits überlastet
                 if model_overloaded:
                     step_counter += 1
-                    print(f"\n[Schritt {step_counter}/{total_steps}] Überspringe {user_count} Benutzer mit {model} (Modell bereits überlastet bei weniger Benutzern)")
+                    print(f"\n[Step {step_counter}/{total_steps}] Skipping {user_count} users for {model} (already overloaded at lower count)")
                     continue
 
                 step_counter += 1
-                print(f"\n[Schritt {step_counter}/{total_steps}] Teste {user_count} Benutzer mit {model}...")
+                print(f"\n[Step {step_counter}/{total_steps}] Testing {user_count} users with {model}...")
+
+                profiles = None
+                if args.mode == 'multi-turn':
+                    profiles = assign_profiles(user_count, args.profile_mix, args.turns_min, args.turns_max)
 
                 result = run_load_test(
                     model, prompts, user_count,
                     args.pause_min, args.pause_max,
-                    args.test_duration, api_type, base_url, api_key, args.gpu, args.llm_provider
+                    args.test_duration, api_type, base_url, api_key, args.gpu, args.llm_provider,
+                    mode=args.mode,
+                    system_prompts_list=system_prompts_list,
+                    turns_min=args.turns_min,
+                    turns_max=args.turns_max,
+                    profiles=profiles
                 )
 
                 if result:
                     results.append(result)
 
-                    # Prüfe ob Test wegen Überlastung abgebrochen wurde
                     if result.error_rate > 30:
                         model_overloaded = True
-                        print(f"\n⚠️ Modell {model} ist bei {user_count} Benutzern überlastet.")
-                        print(f"Weitere Tests mit mehr Benutzern für dieses Modell werden übersprungen.\n")
+                        print(f"\n⚠️ Model {model} is overloaded at {user_count} users.")
+                        print(f"Skipping further tests with more users for this model.\n")
 
-                # Kurze Pause zwischen Tests
                 if step_counter < total_steps:
-                    print("Pause zwischen Tests (10 Sekunden)...")
+                    print("Pause between tests (10 seconds)...")
                     time.sleep(10)
 
-        # Ergebnisse anzeigen
         print_results_table(results)
 
-        # Ergebnisse speichern
         if args.output:
-            # Manuell angegebener Dateiname (nur CSV, ohne Ordner)
             save_results_to_file(results, args.output)
         else:
-            # Automatisches Speichern in results/ Ordner mit Timestamp
             result_dir, timestamp_str = create_results_directory()
 
-            # CSV speichern
             csv_filename = os.path.join(result_dir, "results.csv")
             save_results_to_file(results, csv_filename)
 
-            # Markdown-Zusammenfassung speichern
             md_filename = os.path.join(result_dir, "summary.md")
             test_config = {
                 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -601,21 +696,25 @@ def main():
                 'base_url': base_url,
                 'models': ', '.join(models),
                 'gpu': args.gpu,
+                'mode': args.mode,
                 'test_duration': args.test_duration,
                 'pause_min': args.pause_min,
                 'pause_max': args.pause_max,
-                'user_steps': user_steps
+                'user_steps': user_steps,
+                'profile_mix': args.profile_mix,
+                'turns_min': args.turns_min,
+                'turns_max': args.turns_max,
             }
             save_results_to_markdown(results, md_filename, test_config)
 
-            print(f"\n📁 Ergebnisse gespeichert in: {result_dir}")
+            print(f"\n📁 Results saved to: {result_dir}")
 
-        print(f"\nLoad Test abgeschlossen um {datetime.now().strftime('%H:%M:%S')}")
+        print(f"\nLoad test completed at {datetime.now().strftime('%H:%M:%S')}")
 
     except KeyboardInterrupt:
-        print("\n\nLoad Test abgebrochen!")
+        print("\n\nLoad test aborted!")
         if results:
-            print("Bisherige Ergebnisse:")
+            print("Results so far:")
             print_results_table(results)
 
 if __name__ == "__main__":
