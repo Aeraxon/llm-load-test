@@ -129,9 +129,11 @@ What the profiles control is the **session depth** — how much context a user b
 
 | Profile | Turns per Session |
 |---------|-------------------|
-| Power | `--turns-max` (fixed) |
-| Normal | random between `--turns-min` and `--turns-max` |
-| Occasional | `--turns-min` (fixed) |
+| Power | random in upper half: `mid` – `--turns-max` |
+| Normal | random across full range: `--turns-min` – `--turns-max` |
+| Occasional | random in lower half: `--turns-min` – `mid` |
+
+`mid = turns_min + (turns_max - turns_min) / 2`. Example with `--turns-min 3 --turns-max 7`: Occasional draws 3–5 turns, Normal 3–7, Power 5–7.
 
 The default mix of `40:40:20` (Power:Normal:Occasional) is a conservative assumption that skews toward heavy users. Adjust with `--profile-mix` to reflect your actual audience — e.g. `10:60:30` if most users are light adopters.
 
