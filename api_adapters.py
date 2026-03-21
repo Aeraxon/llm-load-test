@@ -11,9 +11,10 @@ from typing import Dict, Any, Iterator, Tuple, Optional
 class APIAdapter:
     """Base class for API adapters"""
 
-    def __init__(self, base_url: str, api_key: Optional[str] = None):
+    def __init__(self, base_url: str, api_key: Optional[str] = None, reasoning: bool = False):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
+        self.reasoning = reasoning
 
     def make_request(self, model: str, prompt: str, timeout: int = 120) -> Tuple[bool, float, float, str]:
         """
@@ -55,13 +56,13 @@ class OllamaAdapter(APIAdapter):
             ttft_measured = False
             first_token_time = 0.0
 
+            payload = {"model": model, "prompt": prompt, "stream": True}
+            if self.reasoning:
+                payload["think"] = True
+
             response = requests.post(
                 f"{self.base_url}/api/generate",
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "stream": True
-                },
+                json=payload,
                 timeout=timeout,
                 stream=True
             )
@@ -73,8 +74,11 @@ class OllamaAdapter(APIAdapter):
                     if line:
                         try:
                             data = json.loads(line.decode('utf-8'))
+                            has_output = data.get('response', '')
+                            if self.reasoning:
+                                has_output = has_output or data.get('thinking', '')
 
-                            if not ttft_measured and 'response' in data and data['response']:
+                            if not ttft_measured and has_output:
                                 first_token_time = time.time() - start_time
                                 ttft_measured = True
 
@@ -113,9 +117,13 @@ class OllamaAdapter(APIAdapter):
             token_count = 0
             eval_count = None
 
+            payload = {"model": model, "messages": messages, "stream": True}
+            if self.reasoning:
+                payload["think"] = True
+
             response = requests.post(
                 f"{self.base_url}/api/chat",
-                json={"model": model, "messages": messages, "stream": True},
+                json=payload,
                 timeout=timeout,
                 stream=True
             )
@@ -125,9 +133,11 @@ class OllamaAdapter(APIAdapter):
                     if line:
                         try:
                             data = json.loads(line.decode('utf-8'))
-                            content = data.get("message", {}).get("content", "")
+                            msg = data.get("message", {})
+                            content = msg.get("content", "")
+                            thinking = msg.get("thinking", "") if self.reasoning else ""
 
-                            if content and not ttft_measured:
+                            if (content or thinking) and not ttft_measured:
                                 first_token_time = time.time() - start_time
                                 ttft_measured = True
 
@@ -279,9 +289,11 @@ class OpenAICompatibleAdapter(APIAdapter):
                             data = json.loads(line_str)
 
                             if 'choices' in data and len(data['choices']) > 0:
-                                content = data['choices'][0].get('delta', {}).get('content', '')
+                                delta = data['choices'][0].get('delta', {})
+                                content = delta.get('content', '')
+                                reasoning = (delta.get('reasoning_content') or delta.get('reasoning') or '') if self.reasoning else ''
 
-                                if content and not ttft_measured:
+                                if (content or reasoning) and not ttft_measured:
                                     first_token_time = time.time() - start_time
                                     ttft_measured = True
 
@@ -343,7 +355,7 @@ class LlamaCppAdapter(OpenAICompatibleAdapter):
     pass
 
 
-def create_adapter(api_type: str, base_url: str, api_key: Optional[str] = None) -> APIAdapter:
+def create_adapter(api_type: str, base_url: str, api_key: Optional[str] = None, reasoning: bool = False) -> APIAdapter:
     """
     Factory function to create the appropriate adapter
 
@@ -351,6 +363,7 @@ def create_adapter(api_type: str, base_url: str, api_key: Optional[str] = None) 
         api_type: Type of API (ollama, vllm, lmstudio, llamacpp, openai)
         base_url: Base URL of the API
         api_key: Optional API key for authentication
+        reasoning: Whether the model uses reasoning/thinking tokens
 
     Returns:
         APIAdapter instance
@@ -369,4 +382,4 @@ def create_adapter(api_type: str, base_url: str, api_key: Optional[str] = None) 
     if not adapter_class:
         raise ValueError(f"Unknown API type: {api_type}. Supported types: {', '.join(adapters.keys())}")
 
-    return adapter_class(base_url, api_key)
+    return adapter_class(base_url, api_key, reasoning=reasoning)

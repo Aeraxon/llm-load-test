@@ -154,11 +154,11 @@ def assign_profiles(user_count, profile_mix_str, turns_min, turns_max):
 
     return profiles
 
-def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type, base_url, api_key, test_duration):
+def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type, base_url, api_key, test_duration, reasoning=False):
     """Simulates a single-turn user for a fixed test duration (--mode single-turn)"""
     global response_times, ttft_times, error_count, success_count
 
-    adapter = create_adapter(api_type, base_url, api_key)
+    adapter = create_adapter(api_type, base_url, api_key, reasoning=reasoning)
 
     end_time = time.time() + test_duration
 
@@ -183,11 +183,11 @@ def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type,
 
 def llm_chat_multiturn(model, prompts, system_prompts, user_id, profile,
                        turns_min, turns_max, api_type, base_url, api_key, test_duration,
-                       think_min=3.0, think_max=30.0):
+                       think_min=3.0, think_max=30.0, reasoning=False):
     """Simulates a multi-turn chat user for a fixed test duration (--mode multi-turn)"""
     global response_times, ttft_times, tpot_times, error_count, success_count
 
-    adapter = create_adapter(api_type, base_url, api_key)
+    adapter = create_adapter(api_type, base_url, api_key, reasoning=reasoning)
     end_time = time.time() + test_duration
 
     while time.time() < end_time:
@@ -257,7 +257,7 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                   mode='multi-turn', system_prompts_list=None,
                   turns_min=3, turns_max=7, profiles=None,
                   workload_mix_tuple=None, lc_prompts=None, lc_turns_max=2,
-                  think_min=3.0, think_max=30.0):
+                  think_min=3.0, think_max=30.0, reasoning=False):
     """Runs a load test with a given number of simulated users"""
     reset_counters()
 
@@ -300,14 +300,14 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                     target=llm_chat_continuous,
                     args=(model, prompts, user_id,
                           pause_min, pause_max,
-                          api_type, base_url, api_key, test_duration)
+                          api_type, base_url, api_key, test_duration, reasoning)
                 )
             elif user_id < n_single + n_multi:
                 p = multiprocessing.Process(
                     target=llm_chat_multiturn,
                     args=(model, prompts, system_prompts_list, user_id, profile,
                           turns_min, turns_max, api_type, base_url, api_key, test_duration,
-                          think_min, think_max)
+                          think_min, think_max, reasoning)
                 )
             else:
                 # Long-context slice: use lc_prompts pool, capped turn count
@@ -316,7 +316,7 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                     target=llm_chat_multiturn,
                     args=(model, lc_prompts or prompts, system_prompts_list, user_id,
                           lc_profile, 1, lc_turns_max, api_type, base_url, api_key,
-                          test_duration, think_min, think_max)
+                          test_duration, think_min, think_max, reasoning)
                 )
             p.start()
             processes.append(p)
@@ -581,6 +581,8 @@ def main():
                         help="Minimum think time between turns in seconds (default: 3.0, env: THINK_MIN)")
     parser.add_argument("--think-max", type=float, default=None,
                         help="Maximum think time between turns in seconds (default: 30.0, env: THINK_MAX)")
+    parser.add_argument("--reasoning", action="store_true", default=None,
+                        help="Enable reasoning/thinking token detection for TTFT measurement (env: REASONING)")
 
     args = parser.parse_args()
 
@@ -602,6 +604,7 @@ def main():
     pause_max     = resolve_arg(args.pause_max,     'PAUSE_MAX',      default=30.0, cast=float)
     think_min     = resolve_arg(args.think_min,     'THINK_MIN',      default=3.0,  cast=float)
     think_max     = resolve_arg(args.think_max,     'THINK_MAX',      default=30.0, cast=float)
+    reasoning     = resolve_arg(args.reasoning,     'REASONING',      default=False, cast=lambda v: v.lower() in ('true', '1', 'yes'))
     step_size     = resolve_arg(args.step_size,     'STEP_SIZE',      default=5,    cast=int)
     test_duration = resolve_arg(args.test_duration, 'TEST_DURATION',  default=300,  cast=int)
     output        = resolve_arg(args.output,        'OUTPUT')
@@ -668,7 +671,7 @@ def main():
         return
 
     try:
-        adapter = create_adapter(api_type, base_url, api_key)
+        adapter = create_adapter(api_type, base_url, api_key, reasoning=reasoning)
     except ValueError as e:
         print(f"Error: {e}")
         return
@@ -720,6 +723,7 @@ def main():
     print(f"Base URL: {base_url}")
     print(f"Models: {', '.join(models)}")
     print(f"GPU: {gpu}")
+    print(f"Reasoning: {'enabled' if reasoning else 'disabled'}")
     if workload_mix_tuple:
         s, m, lc = workload_mix_tuple
         print(f"Workload mix: {s}% single-turn / {m}% multi-turn / {lc}% long-context")
@@ -782,6 +786,7 @@ def main():
                     lc_turns_max=lc_turns_max,
                     think_min=think_min,
                     think_max=think_max,
+                    reasoning=reasoning,
                 )
 
                 if result:
