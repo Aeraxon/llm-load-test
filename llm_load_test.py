@@ -38,6 +38,7 @@ class TestResult:
     min_response_time: float
     avg_ttft: float
     avg_tpot: float
+    avg_tps: float
     error_rate: float
     total_requests: int
     successful_requests: int
@@ -217,7 +218,8 @@ def llm_chat_multiturn(model, prompts, system_prompts, user_id, profile,
                 tpot_times.append(tpot)
                 success_count.value += 1
                 messages.append({"role": "assistant", "content": "[response]"})
-                print(f"[User {user_id}|turn {turn+1}] ✓ {elapsed:.2f}s (TTFT: {ttft:.2f}s, TPOT: {tpot:.3f}s) - {prompt[:30]}...")
+                tps = (1.0 / tpot) if tpot > 0 else 0.0
+                print(f"[User {user_id}|turn {turn+1}] ✓ {elapsed:.2f}s (TTFT: {ttft:.2f}s, TPOT: {tpot:.3f}s, TPS: {tps:.1f}) - {prompt[:30]}...")
                 # Think time: user reads the response and composes the next message
                 if turn < turns - 1 and time.time() < end_time:
                     think = random.uniform(think_min, think_max)
@@ -227,26 +229,67 @@ def llm_chat_multiturn(model, prompts, system_prompts, user_id, profile,
                 print(f"[User {user_id}|turn {turn+1}] ✗ {error} - restarting session")
                 break  # abandon this session on error, start fresh next loop
 
-def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft):
-    """Generates a recommendation based on TTFT and error rate"""
+def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft, avg_tps=0.0):
+    """Generates a recommendation based on TTFT, TPS, and error rate.
+
+    TPS thresholds are based on human reading speed (Brysbaert 2019:
+    avg 238 WPM ≈ 5.6 TPS):
+      < 3 TPS:  ~1 word/s — critically slow, user actively waiting
+      3–6 TPS:  below reading speed — noticeably slow
+      6–10 TPS: around reading speed — acceptable
+      10–20 TPS: faster than reading — good
+      20+ TPS:  well beyond reading speed — optimal
+    """
+    # Error rate is always the most critical signal
     if error_rate > 10:
         return "❌ Critical"
     elif error_rate > 5:
         return "❌ Overloaded"
     elif error_rate > 2:
         return "⚠️ Unstable"
-    elif avg_ttft > 30:
-        return "❌ Unacceptable"
+
+    # Determine TTFT rating (lower is better)
+    if avg_ttft > 30:
+        ttft_score = 0
     elif avg_ttft > 20:
-        return "⚠️ Very slow"
+        ttft_score = 1
     elif avg_ttft > 10:
-        return "⚠️ Slow"
+        ttft_score = 2
     elif avg_ttft > 5:
-        return "✅ Acceptable"
+        ttft_score = 3
     elif avg_ttft > 2:
-        return "✅ Good"
+        ttft_score = 4
     else:
-        return "✅ Optimal"
+        ttft_score = 5
+
+    # Determine TPS rating (higher is better)
+    # Based on reading speed (~5.6 TPS avg) and perceptual research
+    if avg_tps > 0:
+        if avg_tps < 3:
+            tps_score = 0   # ~1 word/s — critically slow
+        elif avg_tps < 6:
+            tps_score = 1   # below reading speed — very slow
+        elif avg_tps < 10:
+            tps_score = 3   # around reading speed — acceptable
+        elif avg_tps < 20:
+            tps_score = 4   # faster than reading — good
+        else:
+            tps_score = 5   # well beyond reading speed — optimal
+    else:
+        tps_score = ttft_score  # no TPS data, fall back to TTFT only
+
+    # Use the worse of both scores
+    score = min(ttft_score, tps_score)
+
+    labels = {
+        0: "❌ Unacceptable",
+        1: "⚠️ Very slow",
+        2: "⚠️ Slow",
+        3: "✅ Acceptable",
+        4: "✅ Good",
+        5: "✅ Optimal",
+    }
+    return labels[score]
 
 def check_api_connection(adapter):
     """Checks if the API is reachable"""
@@ -334,11 +377,22 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
                 total_requests = success_count.value + error_count.value
                 if total_requests >= 10:
                     timeout_rate = (error_count.value / total_requests) * 100
-                    print(f"[Progress] Requests: {total_requests}, Error rate: {timeout_rate:.1f}%")
+                    current_tpot_list = list(tpot_times)
+                    avg_tps_now = 0.0
+                    if current_tpot_list:
+                        avg_tpot_now = sum(current_tpot_list) / len(current_tpot_list)
+                        avg_tps_now = (1.0 / avg_tpot_now) if avg_tpot_now > 0 else 0.0
+                    tps_str = f", TPS: {avg_tps_now:.1f}" if avg_tps_now > 0 else ""
+                    print(f"[Progress] Requests: {total_requests}, Error rate: {timeout_rate:.1f}%{tps_str}")
 
                     if timeout_rate > 30:
                         print(f"\n⚠️ ABORT: Error rate ({timeout_rate:.1f}%) exceeds 30%!")
                         print("System is overloaded - aborting test.")
+                        break
+
+                    if avg_tps_now > 0 and avg_tps_now < 3:
+                        print(f"\n⚠️ ABORT: TPS ({avg_tps_now:.1f}) below 3 tokens/s!")
+                        print("Generation speed is critically slow - aborting test.")
                         break
 
                 next_check = time.time() + check_interval
@@ -370,12 +424,16 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
         print(f"No successful requests in {user_count}-user test!")
         return None
 
+    avg_tpot = sum(tpot_list) / len(tpot_list) if tpot_list else 0.0
+    avg_tps = (1.0 / avg_tpot) if avg_tpot > 0 else 0.0
+
     recommendation = get_recommendation(
         sum(times) / len(times),
         max(times),
         (error_count.value / total_requests * 100) if total_requests > 0 else 0,
         monitor.get_average_cpu(),
-        sum(ttft_list) / len(ttft_list) if ttft_list else 0
+        sum(ttft_list) / len(ttft_list) if ttft_list else 0,
+        avg_tps
     )
 
     result = TestResult(
@@ -388,6 +446,7 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
         min_response_time=min(times),
         avg_ttft=sum(ttft_list) / len(ttft_list) if ttft_list else 0.0,
         avg_tpot=sum(tpot_list) / len(tpot_list) if tpot_list else 0.0,
+        avg_tps=(1.0 / (sum(tpot_list) / len(tpot_list))) if tpot_list and (sum(tpot_list) / len(tpot_list)) > 0 else 0.0,
         error_rate=(error_count.value / total_requests * 100) if total_requests > 0 else 0,
         total_requests=total_requests,
         successful_requests=success_count.value,
@@ -404,6 +463,7 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
     print(f"  Average response time: {result.avg_response_time:.2f}s")
     print(f"  Average TTFT: {result.avg_ttft:.2f}s")
     print(f"  Average TPOT: {result.avg_tpot:.3f}s")
+    print(f"  Average TPS: {result.avg_tps:.1f} tokens/s")
     print(f"  Max response time: {result.max_response_time:.2f}s")
     print(f"  Error rate: {result.error_rate:.1f}%")
     print(f"  CPU usage: {result.cpu_usage:.1f}%")
@@ -420,23 +480,23 @@ def print_results_table(results: List[TestResult]):
     print("LOAD TEST RESULTS")
     print(f"{'='*165}")
 
-    print(f"{'Users':<8} {'Model':<15} {'LLM Provider':<15} {'GPU':<12} {'Avg. Time':<10} {'TTFT':<8} {'TPOT':<8} {'Max. Time':<10} {'Min. Time':<10} {'Error Rate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Recommendation':<15}")
-    print(f"{'-'*8} {'-'*15} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*15}")
+    print(f"{'Users':<8} {'Model':<15} {'LLM Provider':<15} {'GPU':<12} {'Avg. Time':<10} {'TTFT':<8} {'TPOT':<8} {'TPS':<8} {'Max. Time':<10} {'Min. Time':<10} {'Error Rate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Recommendation':<15}")
+    print(f"{'-'*8} {'-'*15} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*15}")
 
     for result in results:
-        print(f"{result.users:<8} {result.model:<15} {result.llm_provider:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.avg_tpot:<8.3f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<15}")
+        print(f"{result.users:<8} {result.model:<15} {result.llm_provider:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.avg_tpot:<8.3f} {result.avg_tps:<8.1f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<15}")
 
-    print(f"{'-'*165}")
+    print(f"{'-'*173}")
 
 def save_results_to_file(results: List[TestResult], filename: str):
     """Saves results to a CSV file"""
     try:
         with open(filename, 'w', encoding='utf-8') as f:
-            f.write("Users,Model,LLM_Provider,GPU,Avg_Response_Time,Avg_TTFT,Avg_TPOT,Max_Response_Time,Min_Response_Time,Error_Rate,CPU_Percent,Memory_Percent,Total_Requests,Successful_Requests,Failed_Requests,Test_Duration,Recommendation\n")
+            f.write("Users,Model,LLM_Provider,GPU,Avg_Response_Time,Avg_TTFT,Avg_TPOT,Avg_TPS,Max_Response_Time,Min_Response_Time,Error_Rate,CPU_Percent,Memory_Percent,Total_Requests,Successful_Requests,Failed_Requests,Test_Duration,Recommendation\n")
 
             for result in results:
                 f.write(f"{result.users},{result.model},{result.llm_provider},{result.gpu},"
-                        f"{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.avg_tpot:.4f},"
+                        f"{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.avg_tpot:.4f},{result.avg_tps:.1f},"
                         f"{result.max_response_time:.3f},{result.min_response_time:.3f},"
                         f"{result.error_rate:.2f},{result.cpu_usage:.2f},{result.memory_usage:.2f},"
                         f"{result.total_requests},{result.successful_requests},{result.failed_requests},"
@@ -474,11 +534,11 @@ def save_results_to_markdown(results: List[TestResult], filename: str, test_conf
                 f.write(f"## Results: {model}\n\n")
                 model_results = [r for r in results if r.model == model]
 
-                f.write("| Users | Avg. Time (s) | TTFT (s) | TPOT (s) | Max. Time (s) | Error Rate (%) | CPU (%) | Memory (%) | Requests | Recommendation |\n")
-                f.write("|-------|---------------|----------|----------|---------------|----------------|---------|------------|----------|----------------|\n")
+                f.write("| Users | Avg. Time (s) | TTFT (s) | TPOT (s) | TPS | Max. Time (s) | Error Rate (%) | CPU (%) | Memory (%) | Requests | Recommendation |\n")
+                f.write("|-------|---------------|----------|----------|-----|---------------|----------------|---------|------------|----------|----------------|\n")
 
                 for result in model_results:
-                    f.write(f"| {result.users} | {result.avg_response_time:.2f} | {result.avg_ttft:.2f} | {result.avg_tpot:.3f} | {result.max_response_time:.2f} | {result.error_rate:.1f} | {result.cpu_usage:.1f} | {result.memory_usage:.1f} | {result.total_requests} | {result.recommendation} |\n")
+                    f.write(f"| {result.users} | {result.avg_response_time:.2f} | {result.avg_ttft:.2f} | {result.avg_tpot:.3f} | {result.avg_tps:.1f} | {result.max_response_time:.2f} | {result.error_rate:.1f} | {result.cpu_usage:.1f} | {result.memory_usage:.1f} | {result.total_requests} | {result.recommendation} |\n")
 
                 f.write("\n")
 
@@ -487,6 +547,7 @@ def save_results_to_markdown(results: List[TestResult], filename: str, test_conf
                 f.write(f"- **Best performance**: {best_result.users} concurrent users\n")
                 f.write(f"- **Average TTFT**: {best_result.avg_ttft:.2f}s\n")
                 f.write(f"- **Average TPOT**: {best_result.avg_tpot:.3f}s\n")
+                f.write(f"- **Average TPS**: {best_result.avg_tps:.1f} tokens/s\n")
                 f.write(f"- **Average response time**: {best_result.avg_response_time:.2f}s\n")
                 f.write(f"- **Error rate**: {best_result.error_rate:.1f}%\n\n")
 
@@ -794,7 +855,11 @@ def main():
 
                     if result.error_rate > 30:
                         model_overloaded = True
-                        print(f"\n⚠️ Model {model} is overloaded at {user_count} users.")
+                        print(f"\n⚠️ Model {model} is overloaded at {user_count} users (error rate {result.error_rate:.1f}%).")
+                        print(f"Skipping further tests with more users for this model.\n")
+                    elif result.avg_tps > 0 and result.avg_tps < 3:
+                        model_overloaded = True
+                        print(f"\n⚠️ Model {model} is too slow at {user_count} users ({result.avg_tps:.1f} TPS — critically slow).")
                         print(f"Skipping further tests with more users for this model.\n")
 
                 if step_counter < total_steps:
