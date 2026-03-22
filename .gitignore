@@ -1,5 +1,8 @@
 CLAUDE.md
 .claude
+fill_placeholders.py
+translate_long_context.py
+translate_prompts.py
 
 # Python
 __pycache__/
