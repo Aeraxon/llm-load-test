@@ -28,6 +28,8 @@ class TestResult:
     max_response_time: float
     min_response_time: float
     avg_ttft: float
+    avg_answer_ttft: float
+    avg_tokens_per_second: float
     error_rate: float
     total_requests: int
     successful_requests: int
@@ -93,12 +95,18 @@ response_times = multiprocessing.Manager().list()
 ttft_times = multiprocessing.Manager().list()  # Time to First Token
 error_count = multiprocessing.Manager().Value('i', 0)
 success_count = multiprocessing.Manager().Value('i', 0)
+token_counts = multiprocessing.Manager().list()      # completion_tokens pro erfolgreichem Request
+generation_times = multiprocessing.Manager().list()  # Generierungszeit (elapsed - ttft) pro Request
+answer_ttft_times = multiprocessing.Manager().list() # TTFT bis zum ersten Token außerhalb <think>...</think>
 
 def reset_counters():
     """Setzt die globalen Zähler zurück"""
-    global response_times, ttft_times, error_count, success_count
+    global response_times, ttft_times, error_count, success_count, token_counts, generation_times, answer_ttft_times
     response_times[:] = []
     ttft_times[:] = []
+    token_counts[:] = []
+    generation_times[:] = []
+    answer_ttft_times[:] = []
     error_count.value = 0
     success_count.value = 0
 
@@ -116,7 +124,7 @@ def load_prompts(file_path):
 
 def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type, base_url, api_key, test_duration):
     """Simuliert einen Benutzer für eine bestimmte Testdauer"""
-    global response_times, ttft_times, error_count, success_count
+    global response_times, ttft_times, error_count, success_count, token_counts, generation_times, answer_ttft_times
 
     # Create adapter for this process
     adapter = create_adapter(api_type, base_url, api_key)
@@ -127,13 +135,26 @@ def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type,
         # Zufälligen Prompt auswählen
         prompt = random.choice(prompts)
 
-        success, elapsed_time, first_token_time, error_msg = adapter.make_request(model, prompt, timeout=120)
+        success, elapsed_time, first_token_time, answer_ttft, token_count, error_msg = adapter.make_request(model, prompt, timeout=120)
 
         if success:
             response_times.append(elapsed_time)
             ttft_times.append(first_token_time)
+            answer_ttft_times.append(answer_ttft)
             success_count.value += 1
-            print(f"[User {user_id}] ✓ {elapsed_time:.2f}s (TTFT: {first_token_time:.2f}s) - {prompt[:30]}...")
+
+            # Token/s pro User: Tokens geteilt durch reine Generierungszeit (ohne TTFT)
+            gen_time = max(elapsed_time - first_token_time, 1e-6)
+            tps = 0.0
+            if token_count and token_count > 0:
+                token_counts.append(token_count)
+                generation_times.append(gen_time)
+                tps = token_count / gen_time
+
+            ttft_info = f"TTFT: {first_token_time:.2f}s"
+            if abs(answer_ttft - first_token_time) > 0.01:  # nur bei Thinking-Block relevant
+                ttft_info += f", Antw-TTFT: {answer_ttft:.2f}s"
+            print(f"[User {user_id}] ✓ {elapsed_time:.2f}s ({ttft_info}, {tps:.1f} tok/s) - {prompt[:30]}...")
 
             # Pause zwischen erfolgreichen Requests (nur wenn noch Zeit bleibt)
             if time.time() < end_time:
@@ -145,8 +166,8 @@ def llm_chat_continuous(model, prompts, user_id, pause_min, pause_max, api_type,
             # Bei Fehler/Timeout: Sofort neuen Versuch ohne Pause
             continue
 
-def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft):
-    """Erstellt eine Empfehlung basierend auf TTFT und anderen Metriken"""
+def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft, avg_tps=0.0, min_tps=0.0):
+    """Erstellt eine Empfehlung basierend auf TTFT, Token/s pro User und anderen Metriken"""
     # Fehlerrate hat höchste Priorität
     if error_rate > 10:
         return "❌ Kritisch"
@@ -154,6 +175,9 @@ def get_recommendation(avg_time, max_time, error_rate, cpu_usage, avg_ttft):
         return "❌ Überlastet"
     elif error_rate > 2:
         return "⚠️ Instabil"
+    # Token/s pro User unter Lesegeschwindigkeit -> zu langsam
+    elif min_tps > 0 and avg_tps > 0 and avg_tps < min_tps:
+        return "❌ Zu langsam"
     # Dann TTFT-basierte Bewertung
     elif avg_ttft > 30:
         return "❌ Inakzeptabel"
@@ -172,7 +196,7 @@ def check_api_connection(adapter):
     """Prüft ob die API erreichbar ist"""
     return adapter.check_connection()
 
-def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duration, api_type, base_url, api_key, gpu_name, llm_provider):
+def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duration, api_type, base_url, api_key, gpu_name, llm_provider, min_tps=0.0):
     """Führt einen Load-Test mit einer bestimmten Anzahl von Benutzern durch"""
     reset_counters()
 
@@ -210,16 +234,27 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
         while any(p.is_alive() for p in processes):
             time.sleep(1)
 
-            # Alle 30 Sekunden Timeout-Rate prüfen
+            # Alle 30 Sekunden Zwischenstand prüfen (Fehlerrate + Token/s pro User)
             if time.time() >= next_check:
                 total_requests = success_count.value + error_count.value
+
+                # Live-Durchschnitt Token/s pro User
+                tok_list = list(token_counts)
+                gt_list = list(generation_times)
+                live_tps = (sum(tok_list) / sum(gt_list)) if gt_list and sum(gt_list) > 0 else 0.0
+
                 if total_requests >= 10:  # Mindestens 10 Requests für aussagekräftige Statistik
                     timeout_rate = (error_count.value / total_requests) * 100
-                    print(f"[Zwischenstand] Requests: {total_requests}, Fehlerrate: {timeout_rate:.1f}%")
+                    print(f"[Zwischenstand] Requests: {total_requests}, Fehlerrate: {timeout_rate:.1f}%, Ø {live_tps:.1f} tok/s/User")
 
                     if timeout_rate > 30:
                         print(f"\n⚠️ ABBRUCH: Fehlerrate ({timeout_rate:.1f}%) überschreitet 30%!")
                         print("System ist überlastet - Test wird abgebrochen.")
+                        break
+
+                    if min_tps > 0 and live_tps > 0 and live_tps < min_tps:
+                        print(f"\n⚠️ ABBRUCH: Token/s pro User ({live_tps:.1f}) unter Schwelle ({min_tps:.1f} tok/s)!")
+                        print("System ist zu langsam - Test wird abgebrochen.")
                         break
 
                 next_check = time.time() + check_interval
@@ -249,19 +284,27 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
     # Ergebnisse auswerten
     times = list(response_times)
     ttft_list = list(ttft_times)
+    answer_ttft_list = list(answer_ttft_times)
+    tok_list = list(token_counts)
+    gt_list = list(generation_times)
     total_requests = success_count.value + error_count.value
+
+    # Durchschnittliche Token/s pro User (Gesamt-Tokens / Gesamt-Generierungszeit)
+    avg_tps = (sum(tok_list) / sum(gt_list)) if gt_list and sum(gt_list) > 0 else 0.0
 
     if not times:
         print(f"Keine erfolgreichen Requests in {user_count}-Benutzer-Test!")
         return None
 
-    # Empfehlung generieren (jetzt basierend auf TTFT)
+    # Empfehlung generieren (basierend auf Fehlerrate, Token/s pro User und TTFT)
     recommendation = get_recommendation(
         sum(times) / len(times),
         max(times),
         (error_count.value / total_requests * 100) if total_requests > 0 else 0,
         monitor.get_average_cpu(),
-        sum(ttft_list) / len(ttft_list) if ttft_list else 0
+        sum(ttft_list) / len(ttft_list) if ttft_list else 0,
+        avg_tps,
+        min_tps
     )
 
     result = TestResult(
@@ -273,6 +316,8 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
         max_response_time=max(times),
         min_response_time=min(times),
         avg_ttft=sum(ttft_list) / len(ttft_list) if ttft_list else 0,
+        avg_answer_ttft=sum(answer_ttft_list) / len(answer_ttft_list) if answer_ttft_list else 0,
+        avg_tokens_per_second=avg_tps,
         error_rate=(error_count.value / total_requests * 100) if total_requests > 0 else 0,
         total_requests=total_requests,
         successful_requests=success_count.value,
@@ -288,6 +333,8 @@ def run_load_test(model, prompts, user_count, pause_min, pause_max, test_duratio
     print(f"  Fehlgeschlagene Requests: {result.failed_requests}")
     print(f"  Durchschnittliche Antwortzeit: {result.avg_response_time:.2f}s")
     print(f"  Durchschnittliche TTFT: {result.avg_ttft:.2f}s")
+    print(f"  Durchschnittliche TTFT (Antwort, ohne Thinking): {result.avg_answer_ttft:.2f}s")
+    print(f"  Ø Token/s pro User: {result.avg_tokens_per_second:.1f}")
     print(f"  Maximale Antwortzeit: {result.max_response_time:.2f}s")
     print(f"  Fehlerrate: {result.error_rate:.1f}%")
     print(f"  CPU-Auslastung: {result.cpu_usage:.1f}%")
@@ -305,12 +352,12 @@ def print_results_table(results: List[TestResult]):
     print(f"{'='*153}")
 
     # Header
-    print(f"{'Benutzer':<8} {'Modell':<15} {'LLM Provider':<15} {'GPU':<12} {'Avg. Zeit':<10} {'TTFT':<8} {'Max. Zeit':<10} {'Min. Zeit':<10} {'Fehlerrate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Empfehlung':<12}")
-    print(f"{'-'*8} {'-'*15} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*12}")
+    print(f"{'Benutzer':<8} {'Modell':<15} {'LLM Provider':<15} {'GPU':<12} {'Avg. Zeit':<10} {'TTFT':<8} {'TTFT-Antw':<10} {'Tok/s/U':<9} {'Max. Zeit':<10} {'Min. Zeit':<10} {'Fehlerrate':<11} {'CPU %':<8} {'Memory %':<10} {'Requests':<10} {'Empfehlung':<12}")
+    print(f"{'-'*8} {'-'*15} {'-'*15} {'-'*12} {'-'*10} {'-'*8} {'-'*10} {'-'*9} {'-'*10} {'-'*10} {'-'*11} {'-'*8} {'-'*10} {'-'*10} {'-'*12}")
 
     # Datenzeilen
     for result in results:
-        print(f"{result.users:<8} {result.model:<15} {result.llm_provider:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<12}")
+        print(f"{result.users:<8} {result.model:<15} {result.llm_provider:<15} {result.gpu:<12} {result.avg_response_time:<10.2f} {result.avg_ttft:<8.2f} {result.avg_answer_ttft:<10.2f} {result.avg_tokens_per_second:<9.1f} {result.max_response_time:<10.2f} {result.min_response_time:<10.2f} {result.error_rate:<11.1f} {result.cpu_usage:<8.1f} {result.memory_usage:<10.1f} {result.total_requests:<10} {result.recommendation:<12}")
 
     print(f"{'-'*153}")
 
@@ -319,11 +366,11 @@ def save_results_to_file(results: List[TestResult], filename: str):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             # CSV-Header
-            f.write("Benutzer,Modell,LLM_Provider,GPU,Avg_Antwortzeit,Avg_TTFT,Max_Antwortzeit,Min_Antwortzeit,Fehlerrate,CPU_Prozent,Memory_Prozent,Total_Requests,Erfolgreiche_Requests,Fehlgeschlagene_Requests,Testdauer,Empfehlung\n")
+            f.write("Benutzer,Modell,LLM_Provider,GPU,Avg_Antwortzeit,Avg_TTFT,Avg_TTFT_Antwort,Avg_Tokens_pro_Sekunde_pro_User,Max_Antwortzeit,Min_Antwortzeit,Fehlerrate,CPU_Prozent,Memory_Prozent,Total_Requests,Erfolgreiche_Requests,Fehlgeschlagene_Requests,Testdauer,Empfehlung\n")
 
             # Datenzeilen
             for result in results:
-                f.write(f"{result.users},{result.model},{result.llm_provider},{result.gpu},{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.max_response_time:.3f},{result.min_response_time:.3f},{result.error_rate:.2f},{result.cpu_usage:.2f},{result.memory_usage:.2f},{result.total_requests},{result.successful_requests},{result.failed_requests},{result.test_duration:.1f},{result.recommendation}\n")
+                f.write(f"{result.users},{result.model},{result.llm_provider},{result.gpu},{result.avg_response_time:.3f},{result.avg_ttft:.3f},{result.avg_answer_ttft:.3f},{result.avg_tokens_per_second:.2f},{result.max_response_time:.3f},{result.min_response_time:.3f},{result.error_rate:.2f},{result.cpu_usage:.2f},{result.memory_usage:.2f},{result.total_requests},{result.successful_requests},{result.failed_requests},{result.test_duration:.1f},{result.recommendation}\n")
 
         print(f"\nCSV gespeichert: {filename}")
     except Exception as e:
@@ -356,11 +403,11 @@ def save_results_to_markdown(results: List[TestResult], filename: str, test_conf
                 model_results = [r for r in results if r.model == model]
 
                 # Tabelle
-                f.write("| Benutzer | Avg. Zeit (s) | TTFT (s) | Max. Zeit (s) | Fehlerrate (%) | CPU (%) | Memory (%) | Requests | Empfehlung |\n")
-                f.write("|----------|---------------|----------|---------------|----------------|---------|------------|----------|------------|\n")
+                f.write("| Benutzer | Avg. Zeit (s) | TTFT (s) | TTFT Antwort (s) | Tok/s pro User | Max. Zeit (s) | Fehlerrate (%) | CPU (%) | Memory (%) | Requests | Empfehlung |\n")
+                f.write("|----------|---------------|----------|------------------|----------------|---------------|----------------|---------|------------|----------|------------|\n")
 
                 for result in model_results:
-                    f.write(f"| {result.users} | {result.avg_response_time:.2f} | {result.avg_ttft:.2f} | {result.max_response_time:.2f} | {result.error_rate:.1f} | {result.cpu_usage:.1f} | {result.memory_usage:.1f} | {result.total_requests} | {result.recommendation} |\n")
+                    f.write(f"| {result.users} | {result.avg_response_time:.2f} | {result.avg_ttft:.2f} | {result.avg_answer_ttft:.2f} | {result.avg_tokens_per_second:.1f} | {result.max_response_time:.2f} | {result.error_rate:.1f} | {result.cpu_usage:.1f} | {result.memory_usage:.1f} | {result.total_requests} | {result.recommendation} |\n")
 
                 f.write("\n")
 
@@ -369,6 +416,8 @@ def save_results_to_markdown(results: List[TestResult], filename: str, test_conf
                 f.write(f"### Zusammenfassung\n\n")
                 f.write(f"- **Beste Performance**: {best_result.users} gleichzeitige Benutzer\n")
                 f.write(f"- **Durchschnittliche TTFT**: {best_result.avg_ttft:.2f}s\n")
+                f.write(f"- **Durchschnittliche TTFT (Antwort, ohne Thinking)**: {best_result.avg_answer_ttft:.2f}s\n")
+                f.write(f"- **Ø Token/s pro User**: {best_result.avg_tokens_per_second:.1f}\n")
                 f.write(f"- **Durchschnittliche Antwortzeit**: {best_result.avg_response_time:.2f}s\n")
                 f.write(f"- **Fehlerrate**: {best_result.error_rate:.1f}%\n\n")
 
@@ -378,24 +427,30 @@ def save_results_to_markdown(results: List[TestResult], filename: str, test_conf
             total_successful = sum(r.successful_requests for r in results)
             total_failed = sum(r.failed_requests for r in results)
             avg_ttft_all = sum(r.avg_ttft for r in results) / len(results) if results else 0
+            avg_tps_all = sum(r.avg_tokens_per_second for r in results) / len(results) if results else 0
 
             f.write(f"- **Gesamt Requests**: {total_requests}\n")
             f.write(f"- **Erfolgreiche Requests**: {total_successful}\n")
             f.write(f"- **Fehlgeschlagene Requests**: {total_failed}\n")
             f.write(f"- **Durchschnittliche TTFT (alle Tests)**: {avg_ttft_all:.2f}s\n")
+            f.write(f"- **Ø Token/s pro User (alle Tests)**: {avg_tps_all:.1f}\n")
             f.write(f"- **Gesamtfehlerrate**: {(total_failed/total_requests*100) if total_requests > 0 else 0:.1f}%\n\n")
 
             # Empfehlungen
             f.write("## Empfehlungen\n\n")
 
-            # Finde besten Test (höchste Benutzeranzahl mit < 10% Fehlerrate)
-            good_results = [r for r in results if r.error_rate < 10]
+            # Finde besten Test (höchste Benutzeranzahl mit < 10% Fehlerrate und ausreichend Token/s)
+            min_tps = test_config.get('min_tps', 0)
+            good_results = [r for r in results if r.error_rate < 10
+                            and (min_tps <= 0 or r.avg_tokens_per_second == 0 or r.avg_tokens_per_second >= min_tps)]
             if good_results:
                 best = max(good_results, key=lambda r: r.users)
                 f.write(f"- Empfohlene maximale Benutzeranzahl: **{best.users} gleichzeitige Benutzer**\n")
-                f.write(f"- Bei dieser Last: TTFT {best.avg_ttft:.2f}s, Fehlerrate {best.error_rate:.1f}%\n")
+                f.write(f"- Bei dieser Last: TTFT {best.avg_ttft:.2f}s, {best.avg_tokens_per_second:.1f} tok/s pro User, Fehlerrate {best.error_rate:.1f}%\n")
+                if min_tps > 0:
+                    f.write(f"- Schwelle Token/s pro User: {min_tps:.1f}\n")
             else:
-                f.write("- ⚠️ Alle Tests zeigten hohe Fehlerraten (>10%). System ist überlastet.\n")
+                f.write(f"- ⚠️ Alle Tests zeigten hohe Fehlerraten (>10%) oder zu geringe Token/s pro User (<{min_tps:.1f}). System ist überlastet.\n")
 
             f.write("\n")
 
@@ -439,6 +494,10 @@ def main():
                        help="Schrittgröße für Benutzererhöhung (Standard: 5)")
     parser.add_argument("--test-duration", type=int, default=300,
                        help="Testdauer pro Schritt in Sekunden (Standard: 300 = 5 Minuten)")
+    parser.add_argument("--min-tokens-per-second", type=float, default=8.0,
+                       help="Schwelle Token/s pro User. Fällt der Durchschnitt darunter, gilt das Modell als "
+                            "zu langsam und der Test stoppt (wie bei Überlast). Standard: 8.0 (~Lesegeschwindigkeit). "
+                            "0 = deaktiviert.")
     parser.add_argument("--host", type=str, default=None,
                        help="API Host und Port (Standard: aus .env oder 127.0.0.1:11434)")
     parser.add_argument("--api-type", type=str, default=None,
@@ -520,6 +579,7 @@ def main():
     print(f"Schrittgröße: {args.step_size}")
     print(f"Testdauer pro Schritt: {args.test_duration/60:.1f} Minuten")
     print(f"Pausenzeiten: {args.pause_min}-{args.pause_max} Sekunden")
+    print(f"Schwelle Token/s pro User: {args.min_tokens_per_second} (0 = deaktiviert)")
 
     # Schrittweise Tests durchführen
     results = []
@@ -560,16 +620,24 @@ def main():
                 result = run_load_test(
                     model, prompts, user_count,
                     args.pause_min, args.pause_max,
-                    args.test_duration, api_type, base_url, api_key, args.gpu, args.llm_provider
+                    args.test_duration, api_type, base_url, api_key, args.gpu, args.llm_provider,
+                    args.min_tokens_per_second
                 )
 
                 if result:
                     results.append(result)
 
-                    # Prüfe ob Test wegen Überlastung abgebrochen wurde
-                    if result.error_rate > 30:
+                    # Prüfe ob Test wegen Überlastung oder zu geringer Geschwindigkeit abgebrochen wurde
+                    too_slow = (args.min_tokens_per_second > 0
+                                and result.avg_tokens_per_second > 0
+                                and result.avg_tokens_per_second < args.min_tokens_per_second)
+                    if result.error_rate > 30 or too_slow:
                         model_overloaded = True
-                        print(f"\n⚠️ Modell {model} ist bei {user_count} Benutzern überlastet.")
+                        if too_slow and result.error_rate <= 30:
+                            print(f"\n⚠️ Modell {model} ist bei {user_count} Benutzern zu langsam "
+                                  f"({result.avg_tokens_per_second:.1f} tok/s/User < {args.min_tokens_per_second:.1f}).")
+                        else:
+                            print(f"\n⚠️ Modell {model} ist bei {user_count} Benutzern überlastet.")
                         print(f"Weitere Tests mit mehr Benutzern für dieses Modell werden übersprungen.\n")
 
                 # Kurze Pause zwischen Tests
@@ -604,7 +672,8 @@ def main():
                 'test_duration': args.test_duration,
                 'pause_min': args.pause_min,
                 'pause_max': args.pause_max,
-                'user_steps': user_steps
+                'user_steps': user_steps,
+                'min_tps': args.min_tokens_per_second
             }
             save_results_to_markdown(results, md_filename, test_config)
 
