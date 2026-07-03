@@ -8,6 +8,28 @@ import json
 from typing import Dict, Any, Iterator, Tuple, Optional
 
 
+def _thinking_answer_text(accumulated: str) -> str:
+    """Gibt den Antwort-Teil außerhalb eines <think>...</think>-Blocks zurück.
+
+    - Kein Thinking-Block: liefert den gesamten Text.
+    - Innerhalb eines noch offenen <think>-Blocks (oder eines gerade erst
+      angefangenen '<think>'-Tags): liefert Leerstring, damit die 'Antwort-TTFT'
+      erst beim ersten echten Antwort-Token nach </think> gemessen wird.
+    Robust gegen über mehrere Stream-Chunks aufgeteilte Tags, da immer auf dem
+    komplett bisher gesammelten Text gearbeitet wird.
+    """
+    stripped = accumulated.lstrip()
+    if stripped.startswith('<think>'):
+        end = accumulated.find('</think>')
+        if end == -1:
+            return ''  # Thinking-Block noch nicht abgeschlossen
+        return accumulated[end + len('</think>'):]
+    # Könnte ein gerade erst gestreamtes, unvollständiges '<think>' sein -> warten
+    if stripped and '<think>'.startswith(stripped):
+        return ''
+    return accumulated
+
+
 class APIAdapter:
     """Base class for API adapters"""
 
@@ -15,12 +37,14 @@ class APIAdapter:
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
 
-    def make_request(self, model: str, prompt: str, timeout: int = 120) -> Tuple[bool, float, float, str]:
+    def make_request(self, model: str, prompt: str, timeout: int = 120) -> Tuple[bool, float, float, float, int, str]:
         """
         Makes a request to the API and returns results
 
         Returns:
-            Tuple[success: bool, total_time: float, ttft: float, error_msg: str]
+            Tuple[success: bool, total_time: float, ttft: float, answer_ttft: float, completion_tokens: int, error_msg: str]
+            answer_ttft = TTFT bis zum ersten Token außerhalb eines <think>...</think>-Blocks
+            (identisch zu ttft, wenn kein Thinking-Block vorhanden ist)
         """
         raise NotImplementedError
 
@@ -32,13 +56,15 @@ class APIAdapter:
 class OllamaAdapter(APIAdapter):
     """Adapter for Ollama API"""
 
-    def make_request(self, model: str, prompt: str, timeout: int = 120) -> Tuple[bool, float, float, str]:
+    def make_request(self, model: str, prompt: str, timeout: int = 120) -> Tuple[bool, float, float, float, int, str]:
         import time
 
         try:
             start_time = time.time()
             ttft_measured = False
             first_token_time = 0.0
+            answer_ttft_measured = False
+            first_answer_token_time = 0.0
 
             response = requests.post(
                 f"{self.base_url}/api/generate",
@@ -53,6 +79,8 @@ class OllamaAdapter(APIAdapter):
 
             if response.status_code == 200:
                 full_response = ""
+                token_count = 0
+                chunk_count = 0
 
                 for line in response.iter_lines():
                     if line:
@@ -63,10 +91,16 @@ class OllamaAdapter(APIAdapter):
                                 first_token_time = time.time() - start_time
                                 ttft_measured = True
 
-                            if 'response' in data:
+                            if 'response' in data and data['response']:
                                 full_response += data['response']
+                                chunk_count += 1
+                                if not answer_ttft_measured and _thinking_answer_text(full_response) != '':
+                                    first_answer_token_time = time.time() - start_time
+                                    answer_ttft_measured = True
 
                             if data.get('done', False):
+                                # Ollama liefert die exakte Token-Zahl im letzten Chunk
+                                token_count = data.get('eval_count', 0) or 0
                                 break
 
                         except json.JSONDecodeError:
@@ -77,16 +111,24 @@ class OllamaAdapter(APIAdapter):
                 if not ttft_measured:
                     first_token_time = elapsed_time
 
-                return True, elapsed_time, first_token_time, ""
+                # Kein Thinking-Block erkannt -> Antwort-TTFT = normale TTFT
+                if not answer_ttft_measured:
+                    first_answer_token_time = first_token_time
+
+                # Fallback: Anzahl Stream-Chunks als grobe Token-Schätzung
+                if token_count <= 0:
+                    token_count = chunk_count
+
+                return True, elapsed_time, first_token_time, first_answer_token_time, token_count, ""
             else:
-                return False, 0.0, 0.0, f"HTTP {response.status_code}"
+                return False, 0.0, 0.0, 0.0, 0, f"HTTP {response.status_code}"
 
         except requests.exceptions.Timeout:
-            return False, 0.0, 0.0, "Timeout"
+            return False, 0.0, 0.0, 0.0, 0, "Timeout"
         except requests.exceptions.ConnectionError:
-            return False, 0.0, 0.0, "Connection Error"
+            return False, 0.0, 0.0, 0.0, 0, "Connection Error"
         except Exception as e:
-            return False, 0.0, 0.0, str(e)
+            return False, 0.0, 0.0, 0.0, 0, str(e)
 
     def check_connection(self) -> bool:
         try:
@@ -102,13 +144,15 @@ class OpenAICompatibleAdapter(APIAdapter):
     Works with: vLLM, LM Studio, llama.cpp server, Text Generation WebUI, etc.
     """
 
-    def make_request(self, model: str, prompt: str, timeout: int = 120) -> Tuple[bool, float, float, str]:
+    def make_request(self, model: str, prompt: str, timeout: int = 120) -> Tuple[bool, float, float, float, int, str]:
         import time
 
         try:
             start_time = time.time()
             ttft_measured = False
             first_token_time = 0.0
+            answer_ttft_measured = False
+            first_answer_token_time = 0.0
 
             headers = {"Content-Type": "application/json"}
             if self.api_key:
@@ -121,7 +165,9 @@ class OpenAICompatibleAdapter(APIAdapter):
                     "model": model,
                     "prompt": prompt,
                     "stream": True,
-                    "max_tokens": 2000
+                    "max_tokens": 2000,
+                    # Liefert am Ende exakte Token-Zahlen (completion_tokens)
+                    "stream_options": {"include_usage": True}
                 },
                 timeout=timeout,
                 stream=True
@@ -129,6 +175,8 @@ class OpenAICompatibleAdapter(APIAdapter):
 
             if response.status_code == 200:
                 full_response = ""
+                token_count = 0
+                chunk_count = 0
 
                 for line in response.iter_lines():
                     if line:
@@ -142,6 +190,11 @@ class OpenAICompatibleAdapter(APIAdapter):
                         try:
                             data = json.loads(line_str)
 
+                            # Exakte Token-Zahl aus dem usage-Feld (stream_options.include_usage)
+                            usage = data.get('usage')
+                            if usage and usage.get('completion_tokens') is not None:
+                                token_count = usage['completion_tokens']
+
                             if 'choices' in data and len(data['choices']) > 0:
                                 text = data['choices'][0].get('text', '')
 
@@ -149,7 +202,12 @@ class OpenAICompatibleAdapter(APIAdapter):
                                     first_token_time = time.time() - start_time
                                     ttft_measured = True
 
-                                full_response += text
+                                if text:
+                                    full_response += text
+                                    chunk_count += 1
+                                    if not answer_ttft_measured and _thinking_answer_text(full_response) != '':
+                                        first_answer_token_time = time.time() - start_time
+                                        answer_ttft_measured = True
 
                         except json.JSONDecodeError:
                             continue
@@ -159,16 +217,24 @@ class OpenAICompatibleAdapter(APIAdapter):
                 if not ttft_measured:
                     first_token_time = elapsed_time
 
-                return True, elapsed_time, first_token_time, ""
+                # Kein Thinking-Block erkannt -> Antwort-TTFT = normale TTFT
+                if not answer_ttft_measured:
+                    first_answer_token_time = first_token_time
+
+                # Fallback: ein Stream-Chunk entspricht bei vLLM ~einem Token
+                if token_count <= 0:
+                    token_count = chunk_count
+
+                return True, elapsed_time, first_token_time, first_answer_token_time, token_count, ""
             else:
-                return False, 0.0, 0.0, f"HTTP {response.status_code}"
+                return False, 0.0, 0.0, 0.0, 0, f"HTTP {response.status_code}"
 
         except requests.exceptions.Timeout:
-            return False, 0.0, 0.0, "Timeout"
+            return False, 0.0, 0.0, 0.0, 0, "Timeout"
         except requests.exceptions.ConnectionError:
-            return False, 0.0, 0.0, "Connection Error"
+            return False, 0.0, 0.0, 0.0, 0, "Connection Error"
         except Exception as e:
-            return False, 0.0, 0.0, str(e)
+            return False, 0.0, 0.0, 0.0, 0, str(e)
 
     def check_connection(self) -> bool:
         try:
